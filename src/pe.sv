@@ -6,59 +6,62 @@ module pe (
     input logic rst,
 
     // North wires of PE
-    input logic signed [31:0] pe_psum_in,        // 修改: 16b -> 32b (int32)
-    input logic signed [ 7:0] pe_weight_in,      // 修改: 16b -> 8b (int8)
+    input logic signed [31:0] pe_psum_in,        
+    input logic signed [ 7:0] pe_weight_in,      
     input logic pe_accept_w_in, 
     
     // West wires of PE
-    input logic signed [ 7:0] pe_input_in,       // 修改: 16b -> 8b (int8)
+    input logic signed [ 7:0] pe_input_in,       
     input logic pe_valid_in, 
     input logic pe_switch_in, 
     
     input logic pe_enabled,
 
     // South wires of the PE
-    output logic signed [31:0] pe_psum_out,      // 修改: 16b -> 32b (int32)
-    output logic signed [ 7:0] pe_weight_out,    // 修改: 16b -> 8b (int8)
+    output logic signed [31:0] pe_psum_out,      
+    output logic signed [ 7:0] pe_weight_out,    
 
     // East wires of the PE
-    output logic signed [ 7:0] pe_input_out,     // 修改: 16b -> 8b (int8)
+    output logic signed [ 7:0] pe_input_out,     
     output logic pe_valid_out,
     output logic pe_switch_out
 );
 
-    // 内部线网和寄存器类型修改
+    // 内部线网和寄存器类型
     logic signed [15:0] mult_out;           // (int8 * int8) -> int16
     logic signed [31:0] mac_out;            // (int16 + int32) -> int32
-    logic signed [ 7:0] weight_reg_active;  // 修改: 16b -> 8b (int8)
-    logic signed [ 7:0] weight_reg_inactive;// 修改: 16b -> 8b (int8)
+    logic signed [ 7:0] weight_reg_active;  
+    logic signed [ 7:0] weight_reg_inactive;
 
-    // 移除 fxp_mul，替换为原生乘法
-    // int8 * int8 = int16
-    assign mult_out = $signed(pe_input_in) * $signed(weight_reg_active);
+    // 乘法 (int8 * int8 = int16)
+    assign mult_out = $signed(pe_input_in) * $signed(weight_reg_active); 
 
-    // 移除 fxp_add，替换为原生加法
-    // int16 + int32 = int32
-    // $signed() 确保符号扩展正确
-    assign mac_out = $signed(mult_out) + $signed(pe_psum_in);
+    // 加法 (int16 + int32 = int32)
+    assign mac_out = $signed(mult_out) + $signed(pe_psum_in); 
 
+
+    // --- 唯一的时序逻辑块 (已修正) ---
     always_ff @(posedge clk or posedge rst) begin
         if (rst || !pe_enabled) begin
-            // 修改: 更新所有复位值为正确的位宽
+            // 复位所有寄存器
             pe_input_out        <= 8'b0;
-            weight_reg_active   <= 8'b0;
-            weight_reg_inactive <= 8'b0;
-            pe_valid_out        <= 1'b0;
-            pe_weight_out       <= 8'b0;
-            pe_switch_out       <= 1'b0;
-            pe_psum_out         <= 32'b0; // 之前在 'else' 块中 [cite: 152]，但应在此处复位
+            weight_reg_active   <= 8'b0; 
+            weight_reg_inactive <= 8'b0; 
+            pe_valid_out        <= 1'b0; 
+            pe_weight_out       <= 8'b0; 
+            pe_switch_out       <= 1'b0; 
+            pe_psum_out         <= 32'b0; 
         end else begin
+            
+            // --- 路径1: West-to-East 传播 (A 和 Valid 信号) ---
+            // 这些信号像移位寄存器一样，每个周期都向东传递
             pe_valid_out  <= pe_valid_in;
+            pe_input_out  <= pe_input_in;
+            
+            // --- 路径2: West-to-East 传播 (Switch 控制信号) ---
             pe_switch_out <= pe_switch_in;
             
-            // --- 权重加载逻辑 ---
-            
-            // 1. 在背景中加载 "影子" 寄存器
+            // --- 路径3: 权重加载与切换 (North-to-South 和 内部) ---
             if (pe_accept_w_in) begin
                 weight_reg_inactive <= pe_weight_in;
                 pe_weight_out       <= pe_weight_in;
@@ -66,19 +69,20 @@ module pe (
                 pe_weight_out <= 8'b0; 
             end
 
-            // 2. 同步切换：如果 switch 信号有效，
-            //    在时钟边沿将 "影子" 复制到 "活动" 寄存器
             if (pe_switch_in) begin
-                weight_reg_active <= weight_reg_inactive; // <-- 正确的同步切换
+                weight_reg_active <= weight_reg_inactive; 
             end
-            // (如果 pe_switch_in 为 0，weight_reg_active 保持不变)
 
+            // --- 路径4: Psum 计算 (North-to-South) ---
+            // !! 这是关键的修复 !!
             if (pe_valid_in) begin
-                pe_input_out <= pe_input_in;
-                pe_psum_out  <= mac_out; // mac_out 现在是 32b
+                // 如果 West 来的数据有效，执行 MAC 运算
+                pe_psum_out  <= mac_out; 
             end else begin
-                pe_valid_out <= 1'b0;
-                pe_psum_out  <= 32'b0; // 修改: 16b -> 32b
+                // 如果 West 来的数据无效 (气泡)，
+                // 则将 North 来的 psum 直接传递到 South
+                // (实现一级流水线延迟)
+                pe_psum_out  <= pe_psum_in; // <-- 修正: 之前是 32'b0
             end
         end
     end
