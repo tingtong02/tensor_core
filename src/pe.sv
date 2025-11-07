@@ -42,14 +42,6 @@ module pe (
     // $signed() 确保符号扩展正确
     assign mac_out = $signed(mult_out) + $signed(pe_psum_in);
 
-    // Only the switch flag is combinational (active register copies inactive register on the same clock cycle that switch flag is set)
-    // That means inputs from the left side of the PE can load in on the same clock cycle that the switch flag is set
-    always_comb begin
-        if (pe_switch_in) begin
-            weight_reg_active = weight_reg_inactive;
-        end
-    end
-
     always_ff @(posedge clk or posedge rst) begin
         if (rst || !pe_enabled) begin
             // 修改: 更新所有复位值为正确的位宽
@@ -64,13 +56,22 @@ module pe (
             pe_valid_out  <= pe_valid_in;
             pe_switch_out <= pe_switch_in;
             
-            // Weight register updates - only on clock edges
+            // --- 权重加载逻辑 ---
+            
+            // 1. 在背景中加载 "影子" 寄存器
             if (pe_accept_w_in) begin
                 weight_reg_inactive <= pe_weight_in;
                 pe_weight_out       <= pe_weight_in;
             end else begin
-                pe_weight_out <= 8'b0; // 修改: 16b -> 8b
+                pe_weight_out <= 8'b0; 
             end
+
+            // 2. 同步切换：如果 switch 信号有效，
+            //    在时钟边沿将 "影子" 复制到 "活动" 寄存器
+            if (pe_switch_in) begin
+                weight_reg_active <= weight_reg_inactive; // <-- 正确的同步切换
+            end
+            // (如果 pe_switch_in 为 0，weight_reg_active 保持不变)
 
             if (pe_valid_in) begin
                 pe_input_out <= pe_input_in;
