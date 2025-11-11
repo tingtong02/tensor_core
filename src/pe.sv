@@ -94,11 +94,13 @@ module pe #(
             pe_weight_out <= pe_weight_in;
             pe_index_out  <= pe_index_in;
             
-            // 2b. Psum 仅在B流有效时才计算并传递
+            // 2b. Psum 逻辑 (已修正)
             if (pe_valid_in) begin
+                // B-flow 有效: 执行MAC并向下传递结果
                 pe_psum_out <= mac_out;
             end else begin
-                pe_psum_out <= '0; // 刷新管道
+                // B-flow 无效: 仅将上方的 Psum 向下传递 (直通)
+                pe_psum_out <= pe_psum_in;
             end
 
             // 2c. “信号吞噬”逻辑 (A的加载)
