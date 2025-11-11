@@ -55,13 +55,25 @@ module systolic #(
     // --- PE 使能逻辑 ---
     // pe_enabled 是一个 W-bit (16-bit) 的掩码
     // e.g., ub_rd_col_size_in = 4 -> pe_enabled = 00...001111
-    logic [W-1:0] pe_enabled;
-    always_ff @(posedge clk or posedge rst) begin
+    // 1. 初始化 (防御性修复, 消除 'x' 态)
+    //    我们显式地将寄存器初始化为 0
+    logic [W-1:0] pe_enabled = 'b0;
+
+    // 2. 改为同步复位, 并添加显式 'else' 保持逻辑
+    always_ff @(posedge clk) begin
         if (rst) begin
-            pe_enabled <= '0;
-        end else if (ub_rd_col_size_valid_in) begin
-            // (1 << N) - 1 会创建 N 个 1
-            pe_enabled <= (1 << ub_rd_col_size_in) - 1;
+            // 同步复位: 永远最高优先级
+            pe_enabled <= 'b0;
+        end else begin
+            // 非复位状态:
+            // 仅在 valid 信号为 1 时才更新
+            if (ub_rd_col_size_valid_in) begin
+                pe_enabled <= (1 << ub_rd_col_size_in) - 1;
+            end else begin
+                // 明确地告诉综合器在其他情况下保持寄存器的值
+                // 这可以防止意外生成锁存器 (Latch)
+                pe_enabled <= pe_enabled; 
+            end
         end
     end
 
