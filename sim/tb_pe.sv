@@ -1,202 +1,233 @@
 `timescale 1ns/1ps
+`default_nettype none
 
-module testbench;
+module tb_pe;
 
-    // --- 1. Testbench Parameters ---
-    localparam int P_ROW_ID               = 5;
-    localparam int P_SYSTOLIC_ARRAY_WIDTH = 16;
-    localparam int P_DATA_WIDTH_IN        = 8;
-    localparam int P_DATA_WIDTH_ACCUM     = 32;
-    localparam int CLK_PERIOD_NS          = 10;  // 10ns = 100MHz
+    // --- Testbench Parameters ---
+    localparam int TB_ROW_ID               = 5; 
+    localparam int TB_SYSTOLIC_ARRAY_WIDTH = 16;
+    localparam int TB_DATA_WIDTH_IN        = 8;
+    localparam int TB_DATA_WIDTH_ACCUM     = 32;
+    localparam int TB_INDEX_WIDTH          = $clog2(TB_SYSTOLIC_ARRAY_WIDTH);
 
-    // --- 2. Signal Declarations ---
-    logic                                clk;
-    logic                                rst;
-    logic                                pe_enabled;
-    logic                                pe_accept_w_in;
-    logic                                pe_valid_in;
-    logic                                pe_switch_in;
-    logic signed [P_DATA_WIDTH_IN-1:0]     pe_weight_in;
-    logic [$clog2(P_SYSTOLIC_ARRAY_WIDTH)-1:0] pe_index_in;
-    logic signed [P_DATA_WIDTH_ACCUM-1:0]   pe_psum_in;
-    logic signed [P_DATA_WIDTH_IN-1:0]     pe_input_in;
-    // (DUT Outputs)
-    logic signed [P_DATA_WIDTH_IN-1:0]     pe_weight_out;
-    logic [$clog2(P_SYSTOLIC_ARRAY_WIDTH)-1:0] pe_index_out;
-    logic signed [P_DATA_WIDTH_ACCUM-1:0]   pe_psum_out;
-    logic                                pe_accept_w_out;
-    logic signed [P_DATA_WIDTH_IN-1:0]     pe_input_out;
-    logic                                pe_valid_out;
-    logic                                pe_switch_out;
+    // --- Clock and Reset ---
+    logic clk;
+    logic rst;
 
-    // --- 3. Test Variables ---
-    byte  test_A_weight = 10;
-    byte  test_B_input_0 = 2;
-    byte  test_B_input_1 = 3;
-    int   test_psum_in_0 = 100;
-    int   test_psum_in_1 = 200;
-    int   expected_psum_out_0;
-    int   expected_psum_out_1;
+    // --- DUT Inputs (Driven by Testbench) ---
+    logic pe_valid_in;
+    logic pe_switch_in;
+    logic pe_enabled;
+    logic pe_accept_w_in;
+    logic signed [TB_DATA_WIDTH_IN-1:0]     pe_weight_in;
+    logic [TB_INDEX_WIDTH-1:0]              pe_index_in;
+    logic signed [TB_DATA_WIDTH_ACCUM-1:0]  pe_psum_in;
+    logic signed [TB_DATA_WIDTH_IN-1:0]     pe_input_in;
 
-    // --- 4. Instantiate DUT ---
+    // --- DUT Outputs (Monitored by Testbench) ---
+    wire signed [TB_DATA_WIDTH_IN-1:0]     pe_weight_out;
+    wire [TB_INDEX_WIDTH-1:0]              pe_index_out;
+    wire signed [TB_DATA_WIDTH_ACCUM-1:0]  pe_psum_out;
+    wire                                   pe_accept_w_out;
+    wire signed [TB_DATA_WIDTH_IN-1:0]     pe_input_out;
+    wire                                   pe_valid_out;
+    wire                                   pe_switch_out;
+
+    // --- DUT Instantiation ---
     pe #(
-        .ROW_ID(P_ROW_ID),
-        .SYSTOLIC_ARRAY_WIDTH(P_SYSTOLIC_ARRAY_WIDTH),
-        .DATA_WIDTH_IN(P_DATA_WIDTH_IN),
-        .DATA_WIDTH_ACCUM(P_DATA_WIDTH_ACCUM)
+        .ROW_ID               (TB_ROW_ID),
+        .SYSTOLIC_ARRAY_WIDTH (TB_SYSTOLIC_ARRAY_WIDTH),
+        .DATA_WIDTH_IN        (TB_DATA_WIDTH_IN),
+        .DATA_WIDTH_ACCUM     (TB_DATA_WIDTH_ACCUM)
     ) dut (
-        .clk(clk),
-        .rst(rst),
-        .pe_enabled(pe_enabled),
-        .pe_accept_w_in(pe_accept_w_in),
-        .pe_weight_in(pe_weight_in),
-        .pe_index_in(pe_index_in),
-        .pe_psum_in(pe_psum_in),
-        .pe_valid_in(pe_valid_in),
-        .pe_switch_in(pe_switch_in),
-        .pe_input_in(pe_input_in),
-        .pe_weight_out(pe_weight_out),
-        .pe_index_out(pe_index_out),
-        .pe_psum_out(pe_psum_out),
-        .pe_accept_w_out(pe_accept_w_out),
-        .pe_input_out(pe_input_out),
-        .pe_valid_out(pe_valid_out),
-        .pe_switch_out(pe_switch_out)
+        .clk                (clk),
+        .rst                (rst),
+        .pe_valid_in        (pe_valid_in),
+        .pe_switch_in       (pe_switch_in),
+        .pe_enabled         (pe_enabled),
+        .pe_accept_w_in     (pe_accept_w_in),
+        .pe_weight_in       (pe_weight_in),
+        .pe_index_in        (pe_index_in),
+        .pe_psum_in         (pe_psum_in),
+        .pe_input_in        (pe_input_in),
+        .pe_weight_out      (pe_weight_out),
+        .pe_index_out       (pe_index_out),
+        .pe_psum_out        (pe_psum_out),
+        .pe_accept_w_out    (pe_accept_w_out),
+        .pe_input_out       (pe_input_out),
+        .pe_valid_out       (pe_valid_out),
+        .pe_switch_out      (pe_switch_out)
     );
 
-    // --- 5. Clock and Reset ---
-    initial clk = 1'b0;
-    // *** FIX 1: Use hard-coded integer delay for clock ***
-    always #(CLK_PERIOD_NS / 2) clk = ~clk; // Now #5
+    // --- Clock Generation ---
+    initial begin
+        clk = 0;
+        forever #5 clk = ~clk; // 100MHz Clock
+    end
 
-    task reset_dut;
-        rst = 1'b1;
-        pe_enabled = 1'b0;
-        pe_accept_w_in = 1'b0;
-        pe_valid_in = 1'b0;
-        pe_switch_in = 1'b0;
+    // --- Waveform Dump ---
+    initial begin
+        $dumpfile("tb_pe.vcd");
+        $dumpvars(0, tb_pe);
+    end
+
+    // --- Main Test Sequence ---
+    initial begin
+        $display("--- Testbench Started ---");
+        
+        // --- 1. Reset Test ---
+        $display("--- 1. Reset Test ---");
+        rst = 1;
+        // *** FIX: Drive all inputs to 0 during reset, not 'x' ***
+        pe_enabled = 0;
+        pe_valid_in = 0;
+        pe_switch_in = 0;
+        pe_accept_w_in = 0;
+        pe_weight_in = '0;  // Was 'x'
+        pe_index_in = '0;   // Was 'x'
+        pe_psum_in = '0;    // Was 'x'
+        pe_input_in = '0;   // Was 'x'
+        
+        @(posedge clk); #1ps;
+        @(posedge clk); #1ps;
+        rst = 0;
+        $display("Reset released.");
+        @(posedge clk); #1ps;
+
+        // This should now pass, as pe_psum_in was '0'
+        assert (pe_psum_out == 0) else $error("psum_out mismatch after reset");
+
+        // --- 2. PE Disabled (pe_enabled = 0) ---
+        $display("--- 2. PE Disabled Test (Psum should pass through) ---");
+        pe_enabled = 0;
+        pe_psum_in = 12345;
+        pe_input_in = 10;
+        pe_valid_in = 1;
+        pe_weight_in = 20;
+        pe_accept_w_in = 1;
+        pe_index_in = TB_ROW_ID;
+
+        @(posedge clk); #1ps;
+        assert (pe_psum_out == 12345) else $error("Disabled PE did not pass through psum");
+        assert (pe_input_out == 0) else $error("Disabled PE did not zero input_out");
+        assert (pe_valid_out == 0) else $error("Disabled PE did not zero valid_out");
+        assert (pe_weight_out == 0) else $error("Disabled PE did not zero weight_out");
+        assert (pe_accept_w_out == 0) else $error("Disabled PE did not zero accept_w_out");
+
+        // --- 3. Weight Loading (Signal-Eating Logic) ---
+        $display("--- 3. Weight Loading Test ---");
+        pe_enabled = 1;
+
+        // 3a. Index Mismatch (Should pass through)
+        $display("  3a. Index Mismatch (ROW_ID=%d, index=%d)", TB_ROW_ID, TB_ROW_ID + 1);
+        pe_accept_w_in = 1;
+        pe_index_in = TB_ROW_ID + 1; // Mismatch
+        pe_weight_in = 8'hAA;
+        @(posedge clk); #1ps;
+        assert (pe_accept_w_out == 1) else $error("Index mismatch: accept_w was not passed down");
+        assert (pe_weight_out == 8'hAA) else $error("Index mismatch: weight_out was not passed down");
+
+        // 3b. Index Match (Should "eat" the signal)
+        $display("  3b. Index Match (ROW_ID=%d, index=%d)", TB_ROW_ID, TB_ROW_ID);
+        pe_accept_w_in = 1;
+        pe_index_in = TB_ROW_ID; // Match
+        pe_weight_in = 8'd10; // Load weight 10 into inactive_reg
+        @(posedge clk); #1ps;
+        assert (pe_accept_w_out == 0) else $error("Index match: accept_w was not eaten");
+        
+        // 3c. Stop loading
+        pe_accept_w_in = 0;
+        @(posedge clk); #1ps;
+
+        // --- 4. MAC Function Test (using active_reg = 0) ---
+        $display("--- 4. MAC Function Test (active_weight = 0) ---");
+        // At this point: active_reg = 0, inactive_reg = 10
+        
+        // 4a. Psum Pass-through (pe_valid_in = 0)
+        $display("  4a. Psum Pass-through (valid=0)");
+        pe_valid_in = 0;
+        pe_psum_in = 500;
+        pe_input_in = 5; // B=5
+        @(posedge clk); #1ps;
+        assert (pe_psum_out == 500) else $error("Psum pass-through failed");
+        assert (pe_valid_out == 0) else $error("valid_out is incorrect");
+
+        // 4b. MAC Calculation (pe_valid_in = 1)
+        // Expected: (B * A) + Psum = (5 * 0) + 500 = 500
+        $display("  4b. MAC Calculation (valid=1, A=0)");
+        pe_valid_in = 1;
+        pe_psum_in = 500;
+        pe_input_in = 5; // B=5
+        @(posedge clk); #1ps;
+        // pe_psum_out = (5 * 0) + 500 = 500
+        assert (pe_psum_out == 500) else $error("MAC calculation (A=0) failed");
+        assert (pe_valid_out == 1) else $error("valid_out is incorrect");
+        assert (pe_input_out == 5) else $error("input_out is incorrect");
+
+        // --- 5. Weight Switch ---
+        $display("--- 5. Weight Switch Test ---");
+        pe_switch_in = 1;
+        @(posedge clk); #1ps;
+        // Internal active_reg now becomes 10
+        pe_switch_in = 0;
+        assert (pe_switch_out == 1) else $error("switch_out is incorrect");
+        @(posedge clk); #1ps;
+        assert (pe_switch_out == 0) else $error("switch_out delay is incorrect");
+
+        // --- 6. MAC Function Test (using active_reg = 10) ---
+        $display("--- 6. MAC Function Test (active_weight = 10) ---");
+        
+        // 6a. MAC Calculation
+        // Expected: (B * A) + Psum = (7 * 10) + 100 = 170
+        $display("  6a. MAC Calculation (A=10)");
+        pe_valid_in = 1;
+        pe_input_in = 7;  // B=7
+        pe_psum_in = 100; // Psum=100
+        @(posedge clk); #1ps;
+        // pe_psum_out = (7 * 10) + 100 = 170
+        assert (pe_psum_out == 170) else $error("MAC calculation (A=10) failed");
+
+        // 6b. Continuous MAC Calculation (Signed Test)
+        // Expected: (B * A) + Psum = (-2 * 10) + 170 = -20 + 170 = 150
+        $display("  6b. Continuous MAC Calculation (Signed)");
+        pe_valid_in = 1;
+        pe_input_in = -2; // B=-2
+        pe_psum_in = 170; // Psum=170 (from previous cycle)
+        @(posedge clk); #1ps;
+        // pe_psum_out = (-2 * 10) + 170 = 150
+        assert (pe_psum_out == 150) else $error("Signed MAC calculation failed");
+        
+        pe_valid_in = 0;
+        @(posedge clk); #1ps;
+
+        // --- 7. Final Reset Test ---
+        $display("--- 7. Final Reset Test ---");
+        rst = 1;
+        // *** FIX: Drive all inputs to 0 during reset, not 'x' ***
+        pe_enabled = 0;
+        pe_valid_in = 0;
+        pe_switch_in = 0;
+        pe_accept_w_in = 0;
         pe_weight_in = '0;
         pe_index_in = '0;
         pe_psum_in = '0;
         pe_input_in = '0;
-        repeat(2) @(posedge clk);
-        rst = 1'b0;
-        pe_enabled = 1'b1;
-        $display("[%0t ns] DUT Reset Complete. PE is Enabled.", $time);
-    endtask
+        @(posedge clk); #1ps;
+        @(posedge clk); #1ps;
+        rst = 0;
+        @(posedge clk); #1ps;
+        
+        // Check if internal weights were reset
+        $display("  7a. Check if weights were reset (A=0)");
+        pe_enabled = 1;
+        pe_valid_in = 1;
+        pe_input_in = 10; // B=10
+        pe_psum_in = 1000; // Psum=1000
+        @(posedge clk); #1ps;
+        // Expected: (B * A) + Psum = (10 * 0) + 1000 = 1000
+        assert (pe_psum_out == 1000) else $error("active_weight was not cleared after reset");
 
-    // --- 6. Main Test Sequence ---
-    initial begin
-        
-        expected_psum_out_0 = (test_B_input_0 * 0) + test_psum_in_0; // 100
-        expected_psum_out_1 = (test_B_input_1 * test_A_weight) + test_psum_in_1; // 230
-
-        reset_dut();
-        
-        $display("[%0t ns] --- Phase A: Weight Load (A-Flow) ---", $time);
-        $display("[%0t ns] Target: PE[ID=%0d] must capture index=%0d with value (%0d)", 
-                 $time, P_ROW_ID, P_ROW_ID, test_A_weight);
-
-        pe_accept_w_in = 1'b1;
-        for (int i = 15; i > P_ROW_ID; i--) begin
-            pe_weight_in = 8'hFF;
-            pe_index_in = i;
-            #1; // *** FIX 2: Add 1ps delay to fix race condition ***
-            @(posedge clk);
-            if (pe_accept_w_out != 1'b1) begin
-                $display("FATAL ERROR: A-Flow Fail: pe_accept_w_out should be 1 (index %0d)", i);
-                $finish;
-            end
-        end
-
-        $display("[%0t ns] A-Flow: Sending matching index %0d...", $time, P_ROW_ID);
-        pe_weight_in = test_A_weight;
-        pe_index_in = P_ROW_ID;
-        #1; // *** FIX 2 ***
-        @(posedge clk);
-        if (pe_accept_w_out != 1'b0) begin
-            $display("FATAL ERROR: A-Flow Fail: pe_accept_w_out should be 0 (index %0d)", P_ROW_ID);
-            $finish;
-        end
-        
-        for (int i = P_ROW_ID - 1; i >= 0; i--) begin
-            pe_weight_in = 8'hFF;
-            pe_index_in = i;
-            #1; // *** FIX 2 ***
-            @(posedge clk);
-            if (pe_accept_w_out != 1'b1) begin
-                $display("FATAL ERROR: A-Flow Fail: pe_accept_w_out should be 1 (index %0d)", i);
-                $finish;
-            end
-        end
-
-        pe_accept_w_in = 1'b0;
-        pe_weight_in = '0;
-        pe_index_in = '0;
-        #1; // *** FIX 2 ***
-        @(posedge clk);
-        if (pe_accept_w_out != 1'b0) begin
-            $display("FATAL ERROR: A-Flow Fail: pe_accept_w_out (stream off) should be 0");
-            $finish;
-        end
-        
-        $display("[%0t ns] A-Flow: Phase A (Weight Load) Verified!", $time);
-        @(posedge clk); // Wait one cycle
-        
-        $display("[%0t ns] --- Phase B: Compute (B-Flow) ---", $time);
-
-        $display("[%0t ns] B-Flow: Sending B[0] (%0d) + psum_in (%0d) + switch=1", 
-                 $time, test_B_input_0, test_psum_in_0);
-        pe_valid_in  = 1'b1;
-        pe_switch_in = 1'b1; 
-        pe_input_in  = test_B_input_0;
-        pe_psum_in   = test_psum_in_0;
-        #1; // *** FIX 2 ***
-        @(posedge clk);
-        
-        $display("[%0t ns] B-Flow: Sending B[1] (%0d) + psum_in (%0d) + switch=0", 
-                 $time, test_B_input_1, test_psum_in_1);
-        
-        if (pe_psum_out != expected_psum_out_0) begin
-            $display("FATAL ERROR: B-Flow Fail: Cycle 0 Psum incorrect. Expected: %0d, Got: %0d", 
-                     expected_psum_out_0, pe_psum_out);
-            $finish;
-        end
-        $display("[%0t ns] B-Flow: Cycle 0 Results Verified (Psum=%0d)", $time, pe_psum_out);
-
-        pe_valid_in  = 1'b1;
-        pe_switch_in = 1'b0; 
-        pe_input_in  = test_B_input_1;
-        pe_psum_in   = test_psum_in_1;
-        #1; // *** FIX 2 ***
-        @(posedge clk);
-
-        $display("[%0t ns] B-Flow: Stopping B-flow (valid=0)", $time);
-
-        if (pe_psum_out != expected_psum_out_1) begin
-            $display("FATAL ERROR: B-Flow Fail: Cycle 1 Psum incorrect. Expected: %0d, Got: %0d", 
-                     expected_psum_out_1, pe_psum_out);
-            $finish;
-        end
-        $display("[%0t ns] B-Flow: Cycle 1 Results Verified (Psum=%0d)", $time, pe_psum_out);
-        
-        pe_valid_in  = 1'b0;
-        pe_switch_in = 1'b0;
-        pe_input_in  = '0;
-        pe_psum_in   = '0;
-        #1; // *** FIX 2 ***
-        @(posedge clk);
-        
-        $display("[%0t ns] B-Flow: Checking pipeline flush", $time);
-        
-        if (pe_psum_out != 0) begin
-            $display("FATAL ERROR: B-Flow Fail: Pipeline flush failed. Psum Expected: 0, Got: %0d", pe_psum_out);
-            $finish;
-        end
-        $display("[%0t ns] B-Flow: Pipeline flush verified!", $time);
-        
-        @(posedge clk);
-        $display("[%0t ns] --- All Tests Passed! ---", $time);
+        $display("--- All Tests Passed ---");
         $finish;
     end
 

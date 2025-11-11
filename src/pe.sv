@@ -61,12 +61,17 @@ module pe #(
     assign mac_out = $signed(mult_result) + pe_psum_in;
 
     // 匹配逻辑: 检查A的索引是否等于本PE的行ID
-    assign pe_match = (pe_index_in == ROW_ID);
+    // 使用 $clog2 确保代码的通用性
+    localparam INDEX_WIDTH = $clog2(SYSTOLIC_ARRAY_WIDTH);
+
+    // 显式地将 ROW_ID 转换为 4 位，然后再比较
+    assign pe_match = (pe_index_in == INDEX_WIDTH'(ROW_ID));
 
 
-    // --- 时序逻辑: 寄存器更新 ---
-    always_ff @(posedge clk or posedge rst) begin
-        if (rst || !pe_enabled) begin
+// --- 时序逻辑: 寄存器更新 (已修正) ---
+    always_ff @(posedge clk) begin
+        if (rst) begin
+            // --- 1. 同步复位: 永远最高优先级 ---
             // 复位所有输出
             pe_input_out        <= '0;
             pe_valid_out        <= 1'b0;
@@ -75,53 +80,66 @@ module pe #(
             pe_weight_out       <= '0;
             pe_index_out        <= '0;
             pe_accept_w_out     <= 1'b0;
-
             // 复位所有内部状态
             weight_reg_active   <= '0;
             weight_reg_inactive <= '0;
-        
+            
         end else begin
-            
-            // --- 1. 信号传播 (West-to-East) ---
-            // B, valid, switch 信号水平传递
-            pe_input_out  <= pe_input_in;
-            pe_valid_out  <= pe_valid_in;
-            pe_switch_out <= pe_switch_in;
+            // --- 2. 非复位状态: 现在检查 'pe_enabled' ---
+            if (pe_enabled) begin
+                // --- PE 已使能: 正常运行 ---
+                
+                // (1. 信号传播 West-to-East)
+                pe_input_out  <= pe_input_in;
+                pe_valid_out  <= pe_valid_in;
+                pe_switch_out <= pe_switch_in;
 
-            // --- 2. 信号传播 (North-to-South) ---
-            
-            // 2a. A的数据和索引 *总是* 向下传递
-            pe_weight_out <= pe_weight_in;
-            pe_index_out  <= pe_index_in;
-            
-            // 2b. Psum 逻辑 (已修正)
-            if (pe_valid_in) begin
-                // B-flow 有效: 执行MAC并向下传递结果
-                pe_psum_out <= mac_out;
-            end else begin
-                // B-flow 无效: 仅将上方的 Psum 向下传递 (直通)
-                pe_psum_out <= pe_psum_in;
-            end
-
-            // 2c. “信号吞噬”逻辑 (A的加载)
-            if (pe_accept_w_in) begin
-                if (pe_match) begin
-                    // 索引匹配: 锁存权重, 并"吞噬"accept信号 (不再下传)
-                    weight_reg_inactive <= pe_weight_in;
-                    pe_accept_w_out     <= 1'b0;
+                // (2. 信号传播 North-to-South)
+                
+                // (2b. Psum 逻辑: 已修正)
+                if (pe_valid_in) begin
+                    pe_psum_out <= mac_out;
                 end else begin
-                    // 索引不匹配: 传递accept信号
-                    pe_accept_w_out     <= 1'b1;
+                    pe_psum_out <= pe_psum_in; // 直通
                 end
+
+                // (2c. “信号吞噬”逻辑)
+                if (pe_accept_w_in) begin
+                    if (pe_match) begin
+                        weight_reg_inactive <= pe_weight_in;
+                        pe_accept_w_out     <= 1'b0;
+                        pe_weight_out       <= '0; // 停止传播 (或保持)
+                        pe_index_out        <= '0; // 停止传播 (或保持)
+                    end else begin
+                        pe_accept_w_out     <= 1'b1;
+                        pe_weight_out       <= pe_weight_in;  // <-- 移到这里
+                        pe_index_out        <= pe_index_in;   // <-- 移到这里
+                    end
+                end else begin
+                    pe_accept_w_out <= 1'b0;
+                    pe_weight_out   <= '0; // (或保持上一拍的值)
+                    pe_index_out    <= '0; // (或保持上一拍的值)
+                end
+                
+                // (3. 内部权重切换)
+                if (pe_switch_in) begin
+                    weight_reg_active <= weight_reg_inactive;
+                end
+
             end else begin
-                // A流无效: 不传递accept信号
-                pe_accept_w_out <= 1'b0;
-            end
-            
-            // --- 3. 内部权重切换 ---
-            // 当B流的第一个元素到达时，切换权重
-            if (pe_switch_in) begin
-                weight_reg_active <= weight_reg_inactive;
+                // --- PE 已禁用: 充当直通管道 ---
+                // (A/B 流被终止)
+                pe_input_out        <= '0;
+                pe_valid_out        <= 1'b0;
+                pe_switch_out       <= 1'b0;
+                pe_weight_out       <= '0;
+                pe_index_out        <= '0;
+                pe_accept_w_out     <= 1'b0;
+                // (Psum 流被直通)
+                pe_psum_out         <= pe_psum_in; // <-- 关键修复
+                // (内部状态可以保持复位)
+                weight_reg_active   <= '0;
+                weight_reg_inactive <= '0;
             end
         end
     end
