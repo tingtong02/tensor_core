@@ -17,6 +17,9 @@
  * * Psum-Flow (结果):
  * - North-to-South (垂直)
  * - 信号: pe_psum
+*
+ * (已修改: 1. 支持精确的行列使能控制)
+ * (已修改: 2. 修复了 sys_valid_out 逻辑，使其与 Psum 流对齐)
  */
 module systolic #(
     parameter int SYSTOLIC_ARRAY_WIDTH = 16,
@@ -43,39 +46,19 @@ module systolic #(
     output logic signed [DATA_WIDTH_ACCUM-1:0] sys_data_out [SYSTOLIC_ARRAY_WIDTH],
     output logic                               sys_valid_out [SYSTOLIC_ARRAY_WIDTH],
 
-    // --- 控制 (来自您原始设计) ---
-    // 用于支持小于16x16的矩阵 (例如 4x4, 8x8)
-    // 这是一个位掩码，告诉PE列是否应该工作
-    input logic [$clog2(SYSTOLIC_ARRAY_WIDTH+1)-1:0] ub_rd_col_size_in,
-    input logic ub_rd_col_size_valid_in
+// --- 控制 (已修改) ---
+    // 移除了 ub_rd_col_size_in 和 ub_rd_col_size_valid_in 
+    
+    // sys_enable_rows: 'K' 维度的掩码 (启用 PE 行 i)
+    // sys_enable_cols: 'M' 维度的掩码 (启用 PE 列 j)
+    input logic [SYSTOLIC_ARRAY_WIDTH-1:0] sys_enable_rows,
+    input logic [SYSTOLIC_ARRAY_WIDTH-1:0] sys_enable_cols
 );
 
     localparam W = SYSTOLIC_ARRAY_WIDTH; // 别名, 简化代码
 
-    // --- PE 使能逻辑 ---
-    // pe_enabled 是一个 W-bit (16-bit) 的掩码
-    // e.g., ub_rd_col_size_in = 4 -> pe_enabled = 00...001111
-    // 1. 初始化 (防御性修复, 消除 'x' 态)
-    //    我们显式地将寄存器初始化为 0
-    logic [W-1:0] pe_enabled = 'b0;
-
-    // 2. 改为同步复位, 并添加显式 'else' 保持逻辑
-    always_ff @(posedge clk) begin
-        if (rst) begin
-            // 同步复位: 永远最高优先级
-            pe_enabled <= 'b0;
-        end else begin
-            // 非复位状态:
-            // 仅在 valid 信号为 1 时才更新
-            if (ub_rd_col_size_valid_in) begin
-                pe_enabled <= (1 << ub_rd_col_size_in) - 1;
-            end else begin
-                // 明确地告诉综合器在其他情况下保持寄存器的值
-                // 这可以防止意外生成锁存器 (Latch)
-                pe_enabled <= pe_enabled; 
-            end
-        end
-    end
+    // --- PE 使能逻辑 (已删除) ---
+    // 原始的 always_ff 块 [cite: 6-10] 已被移除
 
     // --- 内部连接线网 ---
     // 我们需要 (W+1) 的维度来轻松处理边界 (输入和输出)
@@ -90,6 +73,7 @@ module systolic #(
     logic [$clog2(W)-1:0]                        index_in_grid  [W+1][W]; // A-Flow
     logic                                        accept_w_grid  [W+1][W]; // A-Flow
     logic signed [DATA_WIDTH_ACCUM-1:0]          psum_in_grid   [W+1][W]; // Psum-Flow
+    logic                                        psum_valid_grid [W+1][W]; // <-- 新增: Psum Valid 线网
 
 
     // --- 声明和连接PE的 Generate 块 ---
@@ -110,12 +94,17 @@ module systolic #(
             assign accept_w_grid[0][j]  = sys_accept_w_in[j];
             // Psum (累加和) 总是从 0 开始
             assign psum_in_grid[0][j]   = 32'b0;
+            assign psum_valid_grid[0][j] = 1'b0; // <-- 新增: Psum valid 也从 0 (false) 开始
         end
 
         // --- 2. 实例化 16x16 PE 网格 ---
         // i = 行, j = 列
         for (i = 0; i < W; i++) begin : row_pe_gen
             for (j = 0; j < W; j++) begin : col_pe_gen
+
+                // --- 新的精确使能逻辑 ---
+                // PE[i][j] 仅当其'行(i)'和'列(j)'都处于掩码中时才被使能
+                wire pe_ij_enabled = sys_enable_rows[i] && sys_enable_cols[j];
                 
                 pe #(
                     .ROW_ID(i),  // <-- 核心修改: 传递PE的行ID
@@ -127,7 +116,7 @@ module systolic #(
                     .rst(rst),
                     
                     // --- 控制信号 ---
-                    .pe_enabled(pe_enabled[j]),         // 按列使能
+                    .pe_enabled(pe_ij_enabled),         // <-- 新的精确连接 [cite: 25]
                     .pe_accept_w_in(accept_w_grid[i][j]), // [i][j]   <- 来自上方
                     .pe_valid_in(valid_in_grid[i][j]),   // [i][j]   <- 来自左侧
                     .pe_switch_in(switch_in_grid[i][j]), // [i][j]   <- 来自左侧
@@ -136,6 +125,7 @@ module systolic #(
                     .pe_weight_in(weight_in_grid[i][j]), // [i][j]   <- 来自上方
                     .pe_index_in(index_in_grid[i][j]),   // [i][j]   <- 来自上方
                     .pe_psum_in(psum_in_grid[i][j]),     // [i][j]   <- 来自上方
+                    .pe_psum_valid_in(psum_valid_grid[i][j]), // <-- 新增连接
                     .pe_input_in(data_in_grid[i][j]),    // [i][j]   <- 来自左侧
 
                     // --- 数据输出 (South & East) ---
@@ -144,6 +134,7 @@ module systolic #(
                     .pe_index_out(index_in_grid[i+1][j]),   // [i+1][j] -> 去往下方
                     .pe_accept_w_out(accept_w_grid[i+1][j]), // [i+1][j] -> 去往下方
                     .pe_psum_out(psum_in_grid[i+1][j]),  // [i+1][j] -> 去往下方
+                    .pe_psum_valid_out(psum_valid_grid[i+1][j]), // <-- 新增连接
                     
                     // 水平
                     .pe_input_out(data_in_grid[i][j+1]),   // [i][j+1] -> 去往右方
@@ -158,13 +149,8 @@ module systolic #(
             // 连接最底部(i=W)的Psum输出 到 模块的输出端口
             assign sys_data_out[j] = psum_in_grid[W][j];
             
-            // `sys_valid_out` 必须与 `sys_data_out` 对齐。
-            // `sys_data_out[j]` 是 PE[W-1][j] 的 `pe_psum_out`。
-            // `pe_psum_out` 是在 `pe_valid_in` 到达后的 1 个周期产生的。
-            // `PE[W-1][j]` 的 `pe_valid_out` (即 valid_in_grid[W-1][j+1]) 
-            // 也是在 `pe_valid_in` 到达后的 1 个周期产生的。
-            // 因此，`pe_valid_out` 是 `pe_psum_out` 的完美有效信号。
-            assign sys_valid_out[j] = valid_in_grid[W-1][j+1]; // 这是 PE[W-1][j] 的 valid_out
+            // 修复: sys_valid_out 现在来自新的 psum_valid_grid [cite: 32]
+            assign sys_valid_out[j] = psum_valid_grid[W][j]; // <-- 关键修复
         end
         
         // (右侧和底部的其他输出信号在此设计中被丢弃，
