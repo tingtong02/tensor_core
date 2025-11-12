@@ -7,6 +7,7 @@
  * 特性: 索引匹配 (ROW_ID == pe_index_in)
  * "信号吞噬" (Signal-Eating) 逻辑：
  * 当索引匹配时，PE锁存权重，并停止 pe_accept_w 向下传播。
+ * (已修改: 添加了专用的 Psum Valid 流水线)
  */
 module pe #(
     parameter int ROW_ID               = 0,  // 本PE的行索引 (静态, 由systolic.sv设置)
@@ -29,6 +30,7 @@ module pe #(
     input logic signed [DATA_WIDTH_IN-1:0]     pe_weight_in, // 8-bit 权重 (A)
     input logic [$clog2(SYSTOLIC_ARRAY_WIDTH)-1:0] pe_index_in,  // 权重(A)的索引 (即列号)
     input logic signed [DATA_WIDTH_ACCUM-1:0]   pe_psum_in,   // 32-bit Psum
+    input logic                                 pe_psum_valid_in, // <-- 新增: Psum的有效信号
 
     // --- 数据端口 (West) ---
     input logic signed [DATA_WIDTH_IN-1:0]     pe_input_in,  // 8-bit 输入 (B)
@@ -37,6 +39,7 @@ module pe #(
     output logic signed [DATA_WIDTH_IN-1:0]     pe_weight_out, // 8-bit 权重 (去往下方)
     output logic [$clog2(SYSTOLIC_ARRAY_WIDTH)-1:0] pe_index_out,  // 索引 (去往下方)
     output logic signed [DATA_WIDTH_ACCUM-1:0]   pe_psum_out,   // 32-bit Psum (去往下方)
+    output logic                                pe_psum_valid_out, // <-- 新增: Psum的有效信号
     output logic                               pe_accept_w_out, // "流有效" (去往下方)
 
     // --- 数据端口 (East) ---
@@ -77,9 +80,11 @@ module pe #(
             pe_valid_out        <= 1'b0;
             pe_switch_out       <= 1'b0;
             pe_psum_out         <= '0;
+            pe_psum_valid_out   <= 1'b0; // <-- 新增: 复位 Psum valid
             pe_weight_out       <= '0;
             pe_index_out        <= '0;
             pe_accept_w_out     <= 1'b0;
+
             // 复位所有内部状态
             weight_reg_active   <= '0;
             weight_reg_inactive <= '0;
@@ -102,6 +107,11 @@ module pe #(
                 end else begin
                     pe_psum_out <= pe_psum_in; // 直通
                 end
+
+                // (关键修复: Psum Valid 逻辑)
+                // pe_psum_valid_out 必须与 pe_psum_out 具有相同的1周期延迟
+                // 它们都由 pe_valid_in 触发
+                pe_psum_valid_out <= pe_valid_in; // <-- 必须使用 pe_valid_in
 
                 // (2c. “信号吞噬”逻辑)
                 if (pe_accept_w_in) begin
@@ -136,7 +146,8 @@ module pe #(
                 pe_index_out        <= '0;
                 pe_accept_w_out     <= 1'b0;
                 // (Psum 流被直通)
-                pe_psum_out         <= pe_psum_in; // <-- 关键修复
+                pe_psum_out         <= pe_psum_in;         // <-- Psum 数据直通 
+                pe_psum_valid_out   <= pe_psum_valid_in; // <-- 关键修复: Psum valid 也被直通
                 // (内部状态可以保持复位)
                 weight_reg_active   <= '0;
                 weight_reg_inactive <= '0;
