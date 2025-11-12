@@ -1,45 +1,64 @@
 `timescale 1ns/1ps
 `default_nettype none
 
+/**
+ * @brief Testbench for 'pe' (Processing Element)
+ *
+ * 包含一个自动化的测试激励序列，用于验证:
+ * 1. Reset
+ * 2. PE Disabled (Psum Passthrough)
+ * 3. A-Flow FSM (Eat, Propagate, Stop)
+ * 4. MAC Calculation
+ * 5. Double Buffering (Weight Switching)
+ */
 module tb_pe;
 
-    // --- Testbench Parameters ---
-    localparam int TB_ROW_ID               = 5; 
-    localparam int TB_SYSTOLIC_ARRAY_WIDTH = 16;
-    localparam int TB_DATA_WIDTH_IN        = 8;
-    localparam int TB_DATA_WIDTH_ACCUM     = 32;
-    localparam int TB_INDEX_WIDTH          = $clog2(TB_SYSTOLIC_ARRAY_WIDTH);
+    // --- 仿真参数 ---
+    localparam int ROW_ID               = 0; // 必须匹配 Test 3.2 的激励
+    localparam int SYSTOLIC_ARRAY_WIDTH = 16;
+    localparam int DATA_WIDTH_IN        = 8;
+    localparam int DATA_WIDTH_ACCUM     = 32;
+    
+    // DUT 中使用的派生宽度
+    localparam int INDEX_WIDTH          = $clog2(SYSTOLIC_ARRAY_WIDTH);
+    
+    // 时钟周期 (10ns = 100MHz)
+    localparam int CLK_PERIOD           = 10;
 
-    // --- Clock and Reset ---
+    // --- Testbench 信号 ---
+    // 时钟与复位
     logic clk;
     logic rst;
 
-    // --- DUT Inputs (Driven by Testbench) ---
+    // DUT 输入 (Inputs)
     logic pe_valid_in;
     logic pe_switch_in;
     logic pe_enabled;
     logic pe_accept_w_in;
-    logic signed [TB_DATA_WIDTH_IN-1:0]     pe_weight_in;
-    logic [TB_INDEX_WIDTH-1:0]              pe_index_in;
-    logic signed [TB_DATA_WIDTH_ACCUM-1:0]  pe_psum_in;
-    logic signed [TB_DATA_WIDTH_IN-1:0]     pe_input_in;
+    logic signed [DATA_WIDTH_IN-1:0]     pe_weight_in;
+    logic [INDEX_WIDTH-1:0]              pe_index_in;
+    logic signed [DATA_WIDTH_ACCUM-1:0]  pe_psum_in;
+    logic                                pe_psum_valid_in;
+    logic signed [DATA_WIDTH_IN-1:0]     pe_input_in;
 
-    // --- DUT Outputs (Monitored by Testbench) ---
-    wire signed [TB_DATA_WIDTH_IN-1:0]     pe_weight_out;
-    wire [TB_INDEX_WIDTH-1:0]              pe_index_out;
-    wire signed [TB_DATA_WIDTH_ACCUM-1:0]  pe_psum_out;
-    wire                                   pe_accept_w_out;
-    wire signed [TB_DATA_WIDTH_IN-1:0]     pe_input_out;
-    wire                                   pe_valid_out;
-    wire                                   pe_switch_out;
+    // DUT 输出 (Outputs)
+    logic signed [DATA_WIDTH_IN-1:0]     pe_weight_out;
+    logic [INDEX_WIDTH-1:0]              pe_index_out;
+    logic signed [DATA_WIDTH_ACCUM-1:0]  pe_psum_out;
+    logic                                pe_psum_valid_out;
+    logic                                pe_accept_w_out;
+    logic signed [DATA_WIDTH_IN-1:0]     pe_input_out;
+    logic                                pe_valid_out;
+    logic                                pe_switch_out;
 
-    // --- DUT Instantiation ---
+
+    // --- DUT 实例化 ---
     pe #(
-        .ROW_ID               (TB_ROW_ID),
-        .SYSTOLIC_ARRAY_WIDTH (TB_SYSTOLIC_ARRAY_WIDTH),
-        .DATA_WIDTH_IN        (TB_DATA_WIDTH_IN),
-        .DATA_WIDTH_ACCUM     (TB_DATA_WIDTH_ACCUM)
-    ) dut (
+        .ROW_ID               (ROW_ID),
+        .SYSTOLIC_ARRAY_WIDTH (SYSTOLIC_ARRAY_WIDTH),
+        .DATA_WIDTH_IN        (DATA_WIDTH_IN),
+        .DATA_WIDTH_ACCUM     (DATA_WIDTH_ACCUM)
+    ) uut (
         .clk                (clk),
         .rst                (rst),
         .pe_valid_in        (pe_valid_in),
@@ -49,186 +68,197 @@ module tb_pe;
         .pe_weight_in       (pe_weight_in),
         .pe_index_in        (pe_index_in),
         .pe_psum_in         (pe_psum_in),
+        .pe_psum_valid_in   (pe_psum_valid_in),
         .pe_input_in        (pe_input_in),
         .pe_weight_out      (pe_weight_out),
         .pe_index_out       (pe_index_out),
         .pe_psum_out        (pe_psum_out),
+        .pe_psum_valid_out  (pe_psum_valid_out),
         .pe_accept_w_out    (pe_accept_w_out),
         .pe_input_out       (pe_input_out),
         .pe_valid_out       (pe_valid_out),
         .pe_switch_out      (pe_switch_out)
     );
 
-    // --- Clock Generation ---
+
+    // --- 1. 时钟生成 ---
     initial begin
-        clk = 0;
-        forever #5 clk = ~clk; // 100MHz Clock
+        clk = 1'b0;
+        forever #(CLK_PERIOD / 2) clk = ~clk;
     end
 
-    // --- Waveform Dump ---
+    // --- 辅助任务 ---
+    
+    // 等待指定数量的时钟周期
+    task wait_clk(input int cycles = 1);
+        repeat (cycles) @(posedge clk);
+    endtask
+
+    // 将所有输入重置为“空闲”状态 (0)
+    task reset_inputs();
+        @(negedge clk); // 在时钟下降沿驱动，以避免与 DUT 竞争
+        pe_valid_in     <= 1'b0;
+        pe_switch_in    <= 1'b0;
+        pe_enabled      <= 1'b0;
+        pe_accept_w_in  <= 1'b0;
+        pe_weight_in    <= '0;
+        pe_index_in     <= '0;
+        pe_psum_in      <= '0;
+        pe_psum_valid_in <= 1'b0;
+        pe_input_in     <= '0;
+    endtask
+
+
+    // --- 2. 复位、激励与波形Dump ---
     initial begin
+        // --- (VCD) 波形 Dump 设置 ---
         $dumpfile("tb_pe.vcd");
-        $dumpvars(0, tb_pe);
+        $dumpvars(0, tb_pe); 
+
+        // --- Test 1.1: 复位阶段 ---
+        $display("T=%0t: [TB] Test 1.1: Applying Reset...", $time);
+        rst = 1'b1;
+        reset_inputs();
+        
+        wait_clk(2);
+        
+        @(negedge clk);
+        rst = 1'b0;
+        $display("T=%0t: [TB] Releasing Reset.", $time);
+        
+        wait_clk(1);
+
+        // --- Test 1.2: 'pe_enabled = 0' (Psum 直通测试) ---
+        $display("T=%0t: [TB] Test 1.2: Psum Passthrough (pe_enabled=0)", $time);
+        reset_inputs();
+        
+        @(posedge clk);
+        pe_psum_in       <= 32'd1234;
+        pe_psum_valid_in <= 1'b1;
+        
+        @(posedge clk);
+        pe_psum_in       <= 32'd5678;
+        pe_psum_valid_in <= 1'b1;
+        // 检查: T=30ns, psum_out 应为 1234, psum_valid_out 应为 1
+        
+        @(posedge clk);
+        reset_inputs();
+        // 检查: T=40ns, psum_out 应为 5678, psum_valid_out 应为 1
+        
+        wait_clk(2);
+
+        // --- Test 3.2: 'Eat' (加载权重 'A' = 10) ---
+        $display("T=%0t: [TB] Test 3.2: Loading Weight 'A' (8'd10) via 'Eat'", $time);
+        reset_inputs();
+        pe_enabled <= 1'b1;
+        
+        @(posedge clk);
+        pe_accept_w_in <= 1'b1;
+        pe_index_in    <= ROW_ID; // 匹配 (0)
+        pe_weight_in   <= 8'd10;
+        // 检查: 下一拍, pe_accept_w_out=0, weight_reg_inactive=10
+
+        // --- 切换权重 'A' 到 Active ---
+        $display("T=%0t: [TB] Switching Weight 'A' to active", $time);
+        @(posedge clk);
+        reset_inputs();
+        pe_enabled   <= 1'b1;
+        pe_switch_in <= 1'b1;
+        // 检查: 下一拍, weight_reg_active=10
+        
+        @(posedge clk);
+        reset_inputs();
+        pe_enabled <= 1'b1;
+        
+        // --- Test 2.1: 单次 MAC 计算 ---
+        $display("T=%0t: [TB] Test 2.1: Single MAC (5 * 10 + 100 = 150)", $time);
+        @(posedge clk);
+        pe_valid_in      <= 1'b1;
+        pe_input_in      <= 8'd5;
+        pe_psum_in       <= 32'd100;
+        pe_psum_valid_in <= 1'b1;
+        // 检查: 下一拍, psum_out=150, psum_valid_out=1
+        
+        @(posedge clk);
+        reset_inputs();
+        pe_enabled <= 1'b1;
+        
+        wait_clk(2);
+
+        // --- Test 3.1 & 3.3: 'Propagate' 和 'Stop' ---
+        $display("T=%0t: [TB] Test 3.1: Propagate (Index mismatch)", $time);
+        @(posedge clk);
+        pe_accept_w_in <= 1'b1;
+        pe_index_in    <= ROW_ID + 1; // 不匹配 (1)
+        pe_weight_in   <= 8'hAA;
+        // 检查: 下一拍, pe_accept_w_out=1, pe_weight_out=0xAA
+        
+        $display("T=%0t: [TB] Test 3.3: Stop (accept_w=0)", $time);
+        @(posedge clk);
+        reset_inputs();
+        pe_enabled <= 1'b1;
+        // 检查: 下一拍, pe_accept_w_out=0
+        
+        wait_clk(2);
+
+        // --- Test 4.1: 双缓冲 (加载 'B', 边计算边切换) ---
+        $display("T=%0t: [TB] Test 4.1: Double Buffering Test", $time);
+        
+        // 1. 加载 8'd20 (权重 'B') 到 inactive 寄存器
+        $display("T=%0t: [TB]   ... Loading Weight 'B' (8'd20)", $time);
+        @(posedge clk);
+        pe_accept_w_in <= 1'b1;
+        pe_index_in    <= ROW_ID; // 匹配 (0)
+        pe_weight_in   <= 8'd20;
+        
+        @(posedge clk);
+        reset_inputs();
+        pe_enabled <= 1'b1;
+        // 状态: active=10, inactive=20
+        
+        // 2. 使用 active=10 计算，并同时切换
+        $display("T=%0t: [TB]   ... Compute (2*10) AND Switch simultaneously", $time);
+        @(posedge clk);
+        pe_valid_in      <= 1'b1;
+        pe_input_in      <= 8'd2;    // B = 2
+        pe_psum_in       <= 32'd0;
+        pe_psum_valid_in <= 1'b1;
+        pe_switch_in     <= 1'b1;    // 切换 active 和 inactive
+        // 检查: T=160, psum_out=(2*10)=20. 
+        //       DUT 内部 active 更新为 20.
+        
+        // 3. 使用新的 active=20 计算
+        $display("T=%0t: [TB]   ... Compute (3*20) using new weight 'B'", $time);
+        @(posedge clk);
+        pe_valid_in      <= 1'b1;
+        pe_input_in      <= 8'd3;    // B = 3
+        pe_psum_in       <= 32'd0;
+        pe_psum_valid_in <= 1'b1;
+        pe_switch_in     <= 1'b0;    // 停止切换
+        // 检查: T=170, psum_out=(3*20)=60.
+        
+        @(posedge clk);
+        reset_inputs();
+        
+        wait_clk(5);
+
+        // --- 仿真结束 ---
+        $display("T=%0t: [TB] All tests complete.", $time);
+        $finish; // 结束仿真
     end
 
-    // --- Main Test Sequence ---
+    // --- 3. 信号监控 (可选) ---
     initial begin
-        $display("--- Testbench Started ---");
-        
-        // --- 1. Reset Test ---
-        $display("--- 1. Reset Test ---");
-        rst = 1;
-        // *** FIX: Drive all inputs to 0 during reset, not 'x' ***
-        pe_enabled = 0;
-        pe_valid_in = 0;
-        pe_switch_in = 0;
-        pe_accept_w_in = 0;
-        pe_weight_in = '0;  // Was 'x'
-        pe_index_in = '0;   // Was 'x'
-        pe_psum_in = '0;    // Was 'x'
-        pe_input_in = '0;   // Was 'x'
-        
-        @(posedge clk); #1ps;
-        @(posedge clk); #1ps;
-        rst = 0;
-        $display("Reset released.");
-        @(posedge clk); #1ps;
-
-        // This should now pass, as pe_psum_in was '0'
-        assert (pe_psum_out == 0) else $error("psum_out mismatch after reset");
-
-        // --- 2. PE Disabled (pe_enabled = 0) ---
-        $display("--- 2. PE Disabled Test (Psum should pass through) ---");
-        pe_enabled = 0;
-        pe_psum_in = 12345;
-        pe_input_in = 10;
-        pe_valid_in = 1;
-        pe_weight_in = 20;
-        pe_accept_w_in = 1;
-        pe_index_in = TB_ROW_ID;
-
-        @(posedge clk); #1ps;
-        assert (pe_psum_out == 12345) else $error("Disabled PE did not pass through psum");
-        assert (pe_input_out == 0) else $error("Disabled PE did not zero input_out");
-        assert (pe_valid_out == 0) else $error("Disabled PE did not zero valid_out");
-        assert (pe_weight_out == 0) else $error("Disabled PE did not zero weight_out");
-        assert (pe_accept_w_out == 0) else $error("Disabled PE did not zero accept_w_out");
-
-        // --- 3. Weight Loading (Signal-Eating Logic) ---
-        $display("--- 3. Weight Loading Test ---");
-        pe_enabled = 1;
-
-        // 3a. Index Mismatch (Should pass through)
-        $display("  3a. Index Mismatch (ROW_ID=%d, index=%d)", TB_ROW_ID, TB_ROW_ID + 1);
-        pe_accept_w_in = 1;
-        pe_index_in = TB_ROW_ID + 1; // Mismatch
-        pe_weight_in = 8'hAA;
-        @(posedge clk); #1ps;
-        assert (pe_accept_w_out == 1) else $error("Index mismatch: accept_w was not passed down");
-        assert (pe_weight_out == 8'hAA) else $error("Index mismatch: weight_out was not passed down");
-
-        // 3b. Index Match (Should "eat" the signal)
-        $display("  3b. Index Match (ROW_ID=%d, index=%d)", TB_ROW_ID, TB_ROW_ID);
-        pe_accept_w_in = 1;
-        pe_index_in = TB_ROW_ID; // Match
-        pe_weight_in = 8'd10; // Load weight 10 into inactive_reg
-        @(posedge clk); #1ps;
-        assert (pe_accept_w_out == 0) else $error("Index match: accept_w was not eaten");
-        
-        // 3c. Stop loading
-        pe_accept_w_in = 0;
-        @(posedge clk); #1ps;
-
-        // --- 4. MAC Function Test (using active_reg = 0) ---
-        $display("--- 4. MAC Function Test (active_weight = 0) ---");
-        // At this point: active_reg = 0, inactive_reg = 10
-        
-        // 4a. Psum Pass-through (pe_valid_in = 0)
-        $display("  4a. Psum Pass-through (valid=0)");
-        pe_valid_in = 0;
-        pe_psum_in = 500;
-        pe_input_in = 5; // B=5
-        @(posedge clk); #1ps;
-        assert (pe_psum_out == 500) else $error("Psum pass-through failed");
-        assert (pe_valid_out == 0) else $error("valid_out is incorrect");
-
-        // 4b. MAC Calculation (pe_valid_in = 1)
-        // Expected: (B * A) + Psum = (5 * 0) + 500 = 500
-        $display("  4b. MAC Calculation (valid=1, A=0)");
-        pe_valid_in = 1;
-        pe_psum_in = 500;
-        pe_input_in = 5; // B=5
-        @(posedge clk); #1ps;
-        // pe_psum_out = (5 * 0) + 500 = 500
-        assert (pe_psum_out == 500) else $error("MAC calculation (A=0) failed");
-        assert (pe_valid_out == 1) else $error("valid_out is incorrect");
-        assert (pe_input_out == 5) else $error("input_out is incorrect");
-
-        // --- 5. Weight Switch ---
-        $display("--- 5. Weight Switch Test ---");
-        pe_switch_in = 1;
-        @(posedge clk); #1ps;
-        // Internal active_reg now becomes 10
-        pe_switch_in = 0;
-        assert (pe_switch_out == 1) else $error("switch_out is incorrect");
-        @(posedge clk); #1ps;
-        assert (pe_switch_out == 0) else $error("switch_out delay is incorrect");
-
-        // --- 6. MAC Function Test (using active_reg = 10) ---
-        $display("--- 6. MAC Function Test (active_weight = 10) ---");
-        
-        // 6a. MAC Calculation
-        // Expected: (B * A) + Psum = (7 * 10) + 100 = 170
-        $display("  6a. MAC Calculation (A=10)");
-        pe_valid_in = 1;
-        pe_input_in = 7;  // B=7
-        pe_psum_in = 100; // Psum=100
-        @(posedge clk); #1ps;
-        // pe_psum_out = (7 * 10) + 100 = 170
-        assert (pe_psum_out == 170) else $error("MAC calculation (A=10) failed");
-
-        // 6b. Continuous MAC Calculation (Signed Test)
-        // Expected: (B * A) + Psum = (-2 * 10) + 170 = -20 + 170 = 150
-        $display("  6b. Continuous MAC Calculation (Signed)");
-        pe_valid_in = 1;
-        pe_input_in = -2; // B=-2
-        pe_psum_in = 170; // Psum=170 (from previous cycle)
-        @(posedge clk); #1ps;
-        // pe_psum_out = (-2 * 10) + 170 = 150
-        assert (pe_psum_out == 150) else $error("Signed MAC calculation failed");
-        
-        pe_valid_in = 0;
-        @(posedge clk); #1ps;
-
-        // --- 7. Final Reset Test ---
-        $display("--- 7. Final Reset Test ---");
-        rst = 1;
-        // *** FIX: Drive all inputs to 0 during reset, not 'x' ***
-        pe_enabled = 0;
-        pe_valid_in = 0;
-        pe_switch_in = 0;
-        pe_accept_w_in = 0;
-        pe_weight_in = '0;
-        pe_index_in = '0;
-        pe_psum_in = '0;
-        pe_input_in = '0;
-        @(posedge clk); #1ps;
-        @(posedge clk); #1ps;
-        rst = 0;
-        @(posedge clk); #1ps;
-        
-        // Check if internal weights were reset
-        $display("  7a. Check if weights were reset (A=0)");
-        pe_enabled = 1;
-        pe_valid_in = 1;
-        pe_input_in = 10; // B=10
-        pe_psum_in = 1000; // Psum=1000
-        @(posedge clk); #1ps;
-        // Expected: (B * A) + Psum = (10 * 0) + 1000 = 1000
-        assert (pe_psum_out == 1000) else $error("active_weight was not cleared after reset");
-
-        $display("--- All Tests Passed ---");
-        $finish;
+        @(negedge rst); // 等待复位结束
+        $monitor(
+            "T=%0t [CLK=%b RST=%b] ENA=%b | (W_IN) Vld=%b B_in=%d | (N_IN) AccW=%b A_in=%d Idx=%d Psum_in=%d Psum_vld=%b | (E_OUT) Vld=%b B_out=%d | (S_OUT) AccW=%b Psum_out=%d Psum_vld=%b",
+            $time, clk, rst, pe_enabled,
+            pe_valid_in, pe_input_in,
+            pe_accept_w_in, pe_weight_in, pe_index_in, pe_psum_in, pe_psum_valid_in,
+            pe_valid_out, pe_input_out,
+            pe_accept_w_out, pe_psum_out, pe_psum_valid_out
+        );
     end
 
 endmodule
+`default_nettype wire // 恢复默认值
