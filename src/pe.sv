@@ -113,23 +113,50 @@ module pe #(
                 // 它们都由 pe_valid_in 触发
                 pe_psum_valid_out <= pe_valid_in; // <-- 必须使用 pe_valid_in
 
-                // (2c. “信号吞噬”逻辑)
-                if (pe_accept_w_in) begin
-                    if (pe_match) begin
-                        weight_reg_inactive <= pe_weight_in;
-                        pe_accept_w_out     <= 1'b0;
-                        pe_weight_out       <= '0; // 停止传播 (或保持)
-                        pe_index_out        <= '0; // 停止传播 (或保持)
-                    end else begin
-                        pe_accept_w_out     <= 1'b1;
-                        pe_weight_out       <= pe_weight_in;  // <-- 移到这里
-                        pe_index_out        <= pe_index_in;   // <-- 移到这里
-                    end
-                end else begin
-                    pe_accept_w_out <= 1'b0;
-                    pe_weight_out   <= '0; // (或保持上一拍的值)
-                    pe_index_out    <= '0; // (或保持上一拍的值)
+                // // (2c. “信号吞噬”逻辑)
+                // if (pe_accept_w_in) begin
+                //     if (pe_match) begin
+                //         weight_reg_inactive <= pe_weight_in;
+                //         pe_accept_w_out     <= 1'b0;
+                //         pe_weight_out       <= '0; // 停止传播 (或保持)
+                //         pe_index_out        <= '0; // 停止传播 (或保持)
+                //     end else begin
+                //         pe_accept_w_out     <= 1'b1;
+                //         pe_weight_out       <= pe_weight_in;  // <-- 移到这里
+                //         pe_index_out        <= pe_index_in;   // <-- 移到这里
+                //     end
+                // end else begin
+                //     pe_accept_w_out <= 1'b0;
+                //     pe_weight_out   <= '0; // (或保持上一拍的值)
+                //     pe_index_out    <= '0; // (或保持上一拍的值)
+                // end
+
+                // --- 关键修复: (2c. A-Flow 信号吞噬逻辑) ---
+                // 重写为更健壮的 3 状态 FSM
+                
+                if (pe_accept_w_in && !pe_match) begin
+                    // 状态 1: 传播 (Propagate)
+                    // (pe_accept_w_in 为 1, 但索引不匹配)
+                    pe_accept_w_out     <= 1'b1;
+                    pe_weight_out       <= pe_weight_in;
+                    pe_index_out        <= pe_index_in;
+                end 
+                else if (pe_accept_w_in && pe_match) begin
+                    // 状态 2: 吞噬 (Eat)
+                    // (pe_accept_w_in 为 1, 且索引匹配)
+                    weight_reg_inactive <= pe_weight_in;
+                    pe_accept_w_out     <= 1'b0;
+                    pe_weight_out       <= '0;
+                    pe_index_out        <= '0;
+                end 
+                else begin
+                    // 状态 3: 停止 (Stop)
+                    // (pe_accept_w_in 为 0)
+                    pe_accept_w_out     <= 1'b0;
+                    pe_weight_out       <= '0;
+                    pe_index_out        <= '0;
                 end
+                // --- 修复结束 ---
                 
                 // (3. 内部权重切换)
                 if (pe_switch_in) begin
