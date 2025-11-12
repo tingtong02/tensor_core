@@ -68,7 +68,7 @@ module pe #(
     localparam INDEX_WIDTH = $clog2(SYSTOLIC_ARRAY_WIDTH);
 
     // 显式地将 ROW_ID 转换为 4 位，然后再比较
-    assign pe_match = (pe_index_in == INDEX_WIDTH'(ROW_ID));
+    assign pe_match = (pe_index_in == INDEX_WIDTH'(ROW_ID)) && pe_accept_w_in; // 保护
 
 
 // --- 时序逻辑: 寄存器更新 (已修正) ---
