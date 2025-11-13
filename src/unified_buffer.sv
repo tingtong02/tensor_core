@@ -65,6 +65,13 @@ module unified_buffer #(
     
     // 定义存储器阵列 (Block RAM)
     // 这种定义方式通常能被 FPGA 综合工具推断为 BRAM
+    /*
+    *ASIC 综合：
+    *初期/综合前：您可以使用这段代码进行功能验证。
+    *后端/流片前：ASIC 工具（如 Design Compiler）不会把这段代码变成“BRAM”。它可能会试图用成千上万个触发器（Flip-Flops）来搭建这个内存，这会导致面积爆炸且布线无法通过。
+    *正确做法：在 ASIC 流程的后期，您需要用 Memory Compiler（如 TSMC/SMIC 提供的工具） 生成一个真正的 SRAM 硬核 (Hard Macro)（通常是 .lib 和 .lef 文件），然后写一个简单的 Wrapper 模块来替换掉这段 logic mem[] 代码。
+    *结论： 现阶段保留这段代码完全没问题，它是您的 Golden Model。但在做后端布局布线之前，您需要将其替换为工艺厂提供的 SRAM Macro 实例化代码。
+    */
     logic [TOTAL_WIDTH-1:0] mem [0 : (2**ADDR_WIDTH)-1];
 
     // ------------------------------------------------------------------------
@@ -114,5 +121,6 @@ module unified_buffer #(
             rd_data_c[i] = q_c_packed[(i+1)*DATA_WIDTH-1 -: DATA_WIDTH];
         end
     end
+
 
 endmodule
