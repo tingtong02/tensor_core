@@ -6,11 +6,11 @@
  * 规范: 16x16 阵列, int8 输入 (A, B), int32 累加 (E)
  * 实现了 E = A*B (矩阵乘法部分)
  * * 采用了“双缓冲、1周期延迟、流水线寻址”设计
- * * A-Flow (权重加载):
+ * * B-Flow (权重加载):
  * - North-to-South (垂直)
  * - 信号: pe_weight, pe_index, pe_accept_w
  * - 协议: PE[i][j] 在 pe_index_in == ROW_ID (i) 时 "吞噬" 信号并锁存
- * * B-Flow (计算):
+ * * A-Flow (计算):
  * - West-to-East (水平)
  * - 信号: pe_input, pe_valid, pe_switch
  * - 协议: pe_switch_in 必须在 pe_valid_in 之前一个周期 (插入 "气泡")
@@ -29,13 +29,13 @@ module systolic #(
     input logic clk,
     input logic rst,
 
-    // --- 输入 (来自左侧, 矩阵 B) ---
+    // --- 输入 (来自左侧, 矩阵 A) ---
     // 每个 'i' 对应阵列的第 'i' 行
     input logic signed [DATA_WIDTH_IN-1:0]   sys_data_in [SYSTOLIC_ARRAY_WIDTH],
     input logic                             sys_valid_in [SYSTOLIC_ARRAY_WIDTH],
     input logic                             sys_switch_in [SYSTOLIC_ARRAY_WIDTH],
 
-    // --- 输入 (来自顶部, 矩阵 A 和 索引) ---
+    // --- 输入 (来自顶部, 矩阵 B 和 索引) ---
     // 每个 'j' 对应阵列的第 'j' 列
     input logic signed [DATA_WIDTH_IN-1:0]             sys_weight_in [SYSTOLIC_ARRAY_WIDTH],
     input logic [$clog2(SYSTOLIC_ARRAY_WIDTH)-1:0] sys_index_in [SYSTOLIC_ARRAY_WIDTH],
@@ -49,9 +49,10 @@ module systolic #(
 // --- 控制 (已修改) ---
     // 移除了 ub_rd_col_size_in 和 ub_rd_col_size_valid_in 
     
-    // sys_enable_rows: 'K' 维度的掩码 (启用 PE 行 i)
-    // sys_enable_cols: 'M' 维度的掩码 (启用 PE 列 j)
-    input logic [SYSTOLIC_ARRAY_WIDTH-1:0] sys_enable_rows,
+    //A [m * k]   B[k * n]   E\C\D[m * n] 
+    //! sys_enable_rows: 'K' 维度的掩码 (启用 PE 行 i)
+    //! sys_enable_cols: 'N' 维度的掩码 (启用 PE 列 j)
+    input logic [SYSTOLIC_ARRAY_WIDTH-1:0] sys_enable_rows,  
     input logic [SYSTOLIC_ARRAY_WIDTH-1:0] sys_enable_cols
 );
 
@@ -64,14 +65,14 @@ module systolic #(
     // 我们需要 (W+1) 的维度来轻松处理边界 (输入和输出)
 
     // 水平传播的线网 (W行, W+1列)
-    logic signed [DATA_WIDTH_IN-1:0]   data_in_grid   [W][W+1]; // B-Flow
-    logic                              valid_in_grid  [W][W+1]; // B-Flow
-    logic                              switch_in_grid [W][W+1]; // B-Flow
+    logic signed [DATA_WIDTH_IN-1:0]   data_in_grid   [W][W+1]; // A-Flow
+    logic                              valid_in_grid  [W][W+1]; // A-Flow
+    logic                              switch_in_grid [W][W+1]; // A-Flow
 
     // 垂直传播的线网 (W+1行, W列)
-    logic signed [DATA_WIDTH_IN-1:0]             weight_in_grid [W+1][W]; // A-Flow
-    logic [$clog2(W)-1:0]                        index_in_grid  [W+1][W]; // A-Flow
-    logic                                        accept_w_grid  [W+1][W]; // A-Flow
+    logic signed [DATA_WIDTH_IN-1:0]             weight_in_grid [W+1][W]; // B-Flow
+    logic [$clog2(W)-1:0]                        index_in_grid  [W+1][W]; // B-Flow
+    logic                                        accept_w_grid  [W+1][W]; // B-Flow
     logic signed [DATA_WIDTH_ACCUM-1:0]          psum_in_grid   [W+1][W]; // Psum-Flow
     logic                                        psum_valid_grid [W+1][W]; // <-- 新增: Psum Valid 线网
 
