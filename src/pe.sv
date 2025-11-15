@@ -19,21 +19,21 @@ module pe #(
     input logic rst,
 
     // --- 控制信号 (West) ---
-    input logic pe_valid_in,    // 1: 接收输入B, 进行MAC计算
+    input logic pe_valid_in,    // 1: 接收输入A, 进行MAC计算
     input logic pe_switch_in,   // 1: 切换 active/inactive 权重
     
     // --- 控制信号 (North) ---
     input logic pe_enabled,       // PE 使能 (来自systolic的列使能)
-    input logic pe_accept_w_in, // 1: 权重(A)流有效
+    input logic pe_accept_w_in, // 1: 权重(B)流有效
     
     // --- 数据端口 (North) ---
-    input logic signed [DATA_WIDTH_IN-1:0]     pe_weight_in, // 8-bit 权重 (A)
-    input logic [$clog2(SYSTOLIC_ARRAY_WIDTH)-1:0] pe_index_in,  // 权重(A)的索引 (即列号)
+    input logic signed [DATA_WIDTH_IN-1:0]     pe_weight_in, // 8-bit 权重 (B)
+    input logic [$clog2(SYSTOLIC_ARRAY_WIDTH)-1:0] pe_index_in,  // 权重(B)的索引 (即行号)
     input logic signed [DATA_WIDTH_ACCUM-1:0]   pe_psum_in,   // 32-bit Psum
     input logic                                 pe_psum_valid_in, // <-- 新增: Psum的有效信号
 
     // --- 数据端口 (West) ---
-    input logic signed [DATA_WIDTH_IN-1:0]     pe_input_in,  // 8-bit 输入 (B)
+    input logic signed [DATA_WIDTH_IN-1:0]     pe_input_in,  // 8-bit 输入 (A)
 
     // --- 数据端口 (South) ---
     output logic signed [DATA_WIDTH_IN-1:0]     pe_weight_out, // 8-bit 权重 (去往下方)
@@ -57,13 +57,13 @@ module pe #(
     logic signed [DATA_WIDTH_ACCUM-1:0] mac_out;
     wire                                pe_match;
 
-    // 乘法器: B * A
+    // 乘法器: A * B
     assign mult_result = pe_input_in * weight_reg_active;
 
-    // 加法器: (B * A) + Psum
+    // 加法器: (A * B) + Psum
     assign mac_out = $signed(mult_result) + pe_psum_in;
 
-    // 匹配逻辑: 检查A的索引是否等于本PE的行ID
+    // 匹配逻辑: 检查B的索引是否等于本PE的行ID
     // 使用 $clog2 确保代码的通用性
     localparam INDEX_WIDTH = $clog2(SYSTOLIC_ARRAY_WIDTH);
 
@@ -112,27 +112,6 @@ module pe #(
                 // pe_psum_valid_out 必须与 pe_psum_out 具有相同的1周期延迟
                 // 它们都由 pe_valid_in 触发
                 pe_psum_valid_out <= pe_valid_in; // <-- 必须使用 pe_valid_in
-
-                // // (2c. “信号吞噬”逻辑)
-                // if (pe_accept_w_in) begin
-                //     if (pe_match) begin
-                //         weight_reg_inactive <= pe_weight_in;
-                //         pe_accept_w_out     <= 1'b0;
-                //         pe_weight_out       <= '0; // 停止传播 (或保持)
-                //         pe_index_out        <= '0; // 停止传播 (或保持)
-                //     end else begin
-                //         pe_accept_w_out     <= 1'b1;
-                //         pe_weight_out       <= pe_weight_in;  // <-- 移到这里
-                //         pe_index_out        <= pe_index_in;   // <-- 移到这里
-                //     end
-                // end else begin
-                //     pe_accept_w_out <= 1'b0;
-                //     pe_weight_out   <= '0; // (或保持上一拍的值)
-                //     pe_index_out    <= '0; // (或保持上一拍的值)
-                // end
-
-                // --- 关键修复: (2c. A-Flow 信号吞噬逻辑) ---
-                // 重写为更健壮的 3 状态 FSM
                 
                 if (pe_accept_w_in && !pe_match) begin
                     // 状态 1: 传播 (Propagate)

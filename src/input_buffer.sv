@@ -30,7 +30,7 @@ module input_buffer #(
 
     // ========================================================================
     // 读端口 A (Port A)
-    // 目标: Systolic Array Top (权重 A)
+    // 目标: Systolic Array Top (输入 A)
     // ========================================================================
     input logic [ADDR_WIDTH-1:0]  rd_addr_a,
     input logic                   rd_en_a,
@@ -38,7 +38,7 @@ module input_buffer #(
 
     // ========================================================================
     // 读端口 B (Port B)
-    // 目标: Systolic Array Left (输入 B) -> 经过 Skew Buffer
+    // 目标: Systolic Array Left (权重 B) -> 经过 Skew Buffer
     // ========================================================================
     input logic [ADDR_WIDTH-1:0]  rd_addr_b,
     input logic                   rd_en_b,
