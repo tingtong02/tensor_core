@@ -76,7 +76,7 @@ module tb_verification_top;
     task host_write(input [ADDR_WIDTH-1:0] addr, input [DATA_WIDTH_ACCUM-1:0] data[W]);
         @(posedge clk);
         host_wr_addr_in = addr;
-        host_wr_data_in = data;
+        host_wr_data_in = data; // <--- 赋值一个 Unpacked Array
         host_wr_en_in   = 1;
         @(posedge clk);
         host_wr_en_in   = 0;
@@ -94,15 +94,18 @@ module tb_verification_top;
     // 延迟计算: L_D (D-Flow) = 2*K + W
     localparam int L_D = (2 * K_DIM) + W;
 
-    logic [DATA_WIDTH_ACCUM-1:0] row_a_0, row_a_1, row_b_0, row_b_1, row_c_0, row_c_1;
-    logic [DATA_WIDTH_ACCUM-1:0] golden_d_0, golden_d_1;
+    // --- 关键修复: 声明为 Unpacked Arrays ---
+    logic [DATA_WIDTH_ACCUM-1:0] row_a_0 [W], row_a_1 [W];
+    logic [DATA_WIDTH_ACCUM-1:0] row_b_0 [W], row_b_1 [W];
+    logic [DATA_WIDTH_ACCUM-1:0] row_c_0 [W], row_c_1 [W];
+    logic [DATA_WIDTH_ACCUM-1:0] golden_d_0 [W], golden_d_1 [W];
+    // --- 修复结束 ---
 
     // ========================================================================
     // 8. 主测试序列
     // ========================================================================
     initial begin
-        // --- 关键修复: 变量声明必须在所有执行语句之前 ---
-        logic [15:0] total_reads;
+        logic [15:0] total_reads; // 本地变量声明在 begin 之后
         
         $display("TB: Simulation Started.");
         
@@ -170,9 +173,8 @@ module tb_verification_top;
         // --- 5. 模拟 AXI Master 读取结果 ---
         $display("TB: [%0t] Phase 5: Simulating AXI Master reading from Output Buffer...", $time);
         
-        total_reads = axi_master_length; // 赋值语句保留在这里
+        total_reads = axi_master_length;
         
-        // 循环读取 M*N 行 (在我们的架构中是 M 行，因为 N 是并行输出的)
         for (int i = 0; i < M_DIM; i++) begin
             @(posedge clk);
             axim_rd_addr_in = axi_master_src_addr + i;
