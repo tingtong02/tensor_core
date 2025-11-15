@@ -10,7 +10,7 @@
  * - 端口: 3读 (A/B/C) + 1写 (W)
  * * 数据存储策略:
  * - 物理存储单元固定为 32-bit。
- * - int8 数据 (Weight/Input) 存储在 [7:0]，读取后由外部模块截断。
+ * - int8 数据 (Weight/Input) 存储在 [7:0]，读取后由外部模块截断。 // 现在更改了，写入的时候就进行拆分，由axi_full_slave_if完成
  * - int32 数据 (Bias/Result) 使用完整的 [31:0]。
  */
 module unified_buffer #(
