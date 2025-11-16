@@ -350,8 +350,18 @@ module tpu_core #(
         end
     endgenerate
 
-    // 最终写使能: 必须所有列的数据都已对齐且有效
-    assign aligned_wr_valid = &aligned_valid_pipe; // AND-Reduction
+    // 最终写使能: 必须所有 *被启用* (Masked) 的列都已对齐且有效
+    logic [W-1:0] masked_valid_pipe;
+    genvar i_vld;
+    generate
+        for (i_vld = 0; i_vld < W; i_vld++) begin
+            // 如果该列被禁用 (mask=0), 则我们 "不在乎" 它的 valid, 强行置 1
+            // 如果该列被启用 (mask=1), 则我们 "关心" 它的 valid
+            assign masked_valid_pipe[i_vld] = aligned_valid_pipe[i_vld] | (~ctrl_col_mask[i_vld]);
+        end
+    endgenerate
+    
+    assign aligned_wr_valid = &masked_valid_pipe; // AND-Reduction
     assign core_writeback_valid = aligned_wr_valid;
 
 endmodule
