@@ -3,27 +3,10 @@
 
 /**
  * 模块名: tpu_core
- * 功能: TPU 核心数据通路 (Datapath Core)
- * 包含: Input/Output Buffers, Skew Logic, Systolic Array, VPU, De-skew Logic
- * 职责: 负责数据的流动、时序对齐和运算。不包含 FSM。
- *
- * --- 数据流 (Row-Major) ---
- * 1. A-Flow (Input): 
- * - 从 UB 读 Row A[k] -> 
- * - 经过 i-Skew (第 i 行延迟 i 拍) -> 
- * - 送入 Systolic 左侧 (sys_data_in[i])
- * 2. B-Flow (Weight):
- * - 从 UB 读 Row B[i] ->
- * - 经过 j-Skew (第 j 列延迟 j 拍) ->
- * - 送入 Systolic 顶部 (sys_weight_in[j])
- * 3. C-Flow (Bias):
- * - (CU 延迟 L 拍后) 从 UB 读 Row C[k] ->
- * - 经过 j-Skew (第 j 列延迟 j 拍) ->
- * - 送入 VPU (vpu_bias_data_in[j])
- * 4. D-Flow (Result):
- * - VPU[j] 输出 (倾斜 j 拍) ->
- * - 经过 j-DeSkew (反向延迟) ->
- * - 对齐后按行写入 Output Buffer
+ * 功能: TPU 核心数据通路 (Datapath Core) - Modified
+ * 修改: 
+ * 1. 增加了 C-Flow (Bias) 的 Valid 信号通路，确保 Bias 数据与 Psum 数据在 VPU 处精确对齐。
+ * 2. 配合 Control Unit 的统一时序 (t-1 读, t 给 Valid)。
  */
 module tpu_core #(
     parameter int SYSTOLIC_ARRAY_WIDTH = 16,
@@ -53,20 +36,21 @@ module tpu_core #(
     // ========================================================================
     
     // --- A-Flow (Input) 控制 ---
-    input logic [ADDR_WIDTH-1:0] ctrl_rd_addr_a, // UB 读 A[k]
+    input logic [ADDR_WIDTH-1:0] ctrl_rd_addr_a, 
     input logic                  ctrl_rd_en_a,
-    input logic                  ctrl_a_valid,    // 全局 Valid 信号
-    input logic                  ctrl_a_switch,   // 全局 Switch 信号
+    input logic                  ctrl_a_valid,    
+    input logic                  ctrl_a_switch,   
     
     // --- B-Flow (Weight) 控制 ---
-    input logic [ADDR_WIDTH-1:0] ctrl_rd_addr_b, // UB 读 B[i]
+    input logic [ADDR_WIDTH-1:0] ctrl_rd_addr_b, 
     input logic                  ctrl_rd_en_b,
-    input logic                  ctrl_b_accept_w, // 全局 Accept 信号
-    input logic [$clog2(SYSTOLIC_ARRAY_WIDTH)-1:0] ctrl_b_weight_index, // 全局 Index (i)
+    input logic                  ctrl_b_accept_w, 
+    input logic [$clog2(SYSTOLIC_ARRAY_WIDTH)-1:0] ctrl_b_weight_index, 
 
     // --- C-Flow (Bias) 控制 ---
-    input logic [ADDR_WIDTH-1:0] ctrl_rd_addr_c, // UB 读 C[k]
-    input logic                  ctrl_rd_en_c,   // (CU 必须延迟 L 拍后才拉高)
+    input logic [ADDR_WIDTH-1:0] ctrl_rd_addr_c, 
+    input logic                  ctrl_rd_en_c,
+    input logic                  ctrl_c_valid,    // [NEW] 新增 C Valid 端口
     input logic [2:0]            ctrl_vpu_mode,
 
     // --- D-Flow (Result) 控制 ---
@@ -81,7 +65,6 @@ module tpu_core #(
     // ========================================================================
     output logic core_writeback_valid 
 );
-
     localparam W = SYSTOLIC_ARRAY_WIDTH;
 
     // --- 内部连线: Buffer 读出 (32-bit) ---
@@ -102,10 +85,10 @@ module tpu_core #(
     logic signed [DATA_WIDTH_IN-1:0] sys_in_b_skewed [W];
     logic        [$clog2(W)-1:0]     sys_idx_b_skewed  [W];
     logic                            sys_acc_b_skewed  [W];
-    
-    // --- 内部连线: C-Flow Skewed ---
+
+    // --- 内部连线: C-Flow Skewed (Modified) ---
     logic signed [DATA_WIDTH_ACCUM-1:0] sys_in_c_skewed [W];
-    // (sys_val_c_skewed 已被移除)
+    logic                               sys_val_c_skewed [W]; // [NEW] 增加 Valid 连线
 
     // --- 内部连线: Systolic -> VPU ---
     logic signed [DATA_WIDTH_ACCUM-1:0] sys_out_data [W];
@@ -152,15 +135,15 @@ module tpu_core #(
         .rd_en(axim_rd_en_in),
         .rd_data(axim_rd_data_out)
     );
-    
+
     // ========================================================================
     // 逻辑 3: 输入截断 (32-bit to 8-bit)
     // ========================================================================
     genvar i_tr;
     generate
         for (i_tr = 0; i_tr < W; i_tr++) begin : trunc_gen
-            assign sys_in_a_raw[i_tr] = ib_rd_a[i_tr][DATA_WIDTH_IN-1:0]; // A (Input)
-            assign sys_in_b_raw[i_tr] = ib_rd_b[i_tr][DATA_WIDTH_IN-1:0]; // B (Weight)
+            assign sys_in_a_raw[i_tr] = ib_rd_a[i_tr][DATA_WIDTH_IN-1:0];
+            assign sys_in_b_raw[i_tr] = ib_rd_b[i_tr][DATA_WIDTH_IN-1:0];
         end
     endgenerate
 
@@ -174,13 +157,12 @@ module tpu_core #(
         for (i = 0; i < W; i++) begin : a_skew_gen 
             if (i == 0) begin
                 assign sys_in_a_skewed[0] = sys_in_a_raw[0];
-                assign sys_val_a_skewed[0]  = ctrl_a_valid;
-                assign sys_sw_a_skewed[0]   = ctrl_a_switch;
+                assign sys_val_a_skewed[0] = ctrl_a_valid;
+                assign sys_sw_a_skewed[0]  = ctrl_a_switch;
             end else begin
                 logic signed [DATA_WIDTH_IN-1:0] delay_data [i];
                 logic                            delay_val  [i];
                 logic                            delay_sw   [i];
-
                 always_ff @(posedge clk) begin
                     if (rst) begin
                         for(int d=0; d<i; d++) begin
@@ -198,8 +180,8 @@ module tpu_core #(
                     end
                 end
                 assign sys_in_a_skewed[i] = delay_data[i-1];
-                assign sys_val_a_skewed[i]  = delay_val[i-1];
-                assign sys_sw_a_skewed[i]   = delay_sw[i-1];
+                assign sys_val_a_skewed[i] = delay_val[i-1];
+                assign sys_sw_a_skewed[i] = delay_sw[i-1];
             end
         end
 
@@ -208,13 +190,12 @@ module tpu_core #(
         for (j = 0; j < W; j++) begin : b_skew_gen 
             if (j == 0) begin
                 assign sys_in_b_skewed[0] = sys_in_b_raw[0];
-                assign sys_idx_b_skewed[0]  = ctrl_b_weight_index;
-                assign sys_acc_b_skewed[0]  = ctrl_b_accept_w;
+                assign sys_idx_b_skewed[0] = ctrl_b_weight_index;
+                assign sys_acc_b_skewed[0] = ctrl_b_accept_w;
             end else begin
                 logic signed [DATA_WIDTH_IN-1:0] delay_data [j];
                 logic [$clog2(W)-1:0]            delay_idx  [j];
                 logic                            delay_acc  [j];
-
                 always_ff @(posedge clk) begin
                     if (rst) begin
                         for(int d=0; d<j; d++) begin
@@ -232,34 +213,38 @@ module tpu_core #(
                     end
                 end
                 assign sys_in_b_skewed[j] = delay_data[j-1];
-                assign sys_idx_b_skewed[j]  = delay_idx[j-1];
-                assign sys_acc_b_skewed[j]  = delay_acc[j-1];
+                assign sys_idx_b_skewed[j] = delay_idx[j-1];
+                assign sys_acc_b_skewed[j] = delay_acc[j-1];
             end
         end
         
-        // --- C-Flow Skew (Bias Inputs) ---
-        // 目标: 第 j 列延迟 j 个周期 (匹配 E[k][j] 的输出时序)
-        // (CU 负责在正确的时间 (L_base 延迟后) 启动 ctrl_rd_en_c)
-        // (*** 已修改: 移除了 C-Flow 的 valid 传递 ***)
-        for (k = 0; k < W; k++) begin : c_skew_gen // 'k' is loop var, 'j' is concept
+        // --- [Modified] C-Flow Skew (Bias Inputs) ---
+        // 目标: 第 j 列延迟 j 个周期，并且 Valid 信号同步延迟
+        for (k = 0; k < W; k++) begin : c_skew_gen 
             if (k == 0) begin
+                // 第0列无延迟 (由CU保证对齐)
                 assign sys_in_c_skewed[0] = ib_rd_c[0];
+                assign sys_val_c_skewed[0] = ctrl_c_valid; // [NEW]
             end else begin
                 logic signed [DATA_WIDTH_ACCUM-1:0] delay_data [k];
-
+                logic                               delay_val  [k]; // [NEW] Valid 延迟链
                 always_ff @(posedge clk) begin
                     if (rst) begin
                         for(int d=0; d<k; d++) begin
                             delay_data[d] <= '0;
+                            delay_val[d]  <= '0;
                         end
                     end else begin
                         delay_data[0] <= ib_rd_c[k];
+                        delay_val[0]  <= ctrl_c_valid;
                         for(int d=1; d<k; d++) begin
                             delay_data[d] <= delay_data[d-1];
+                            delay_val[d]  <= delay_val[d-1];
                         end
                     end
                 end
                 assign sys_in_c_skewed[k] = delay_data[k-1];
+                assign sys_val_c_skewed[k] = delay_val[k-1]; // [NEW]
             end
         end
     endgenerate
@@ -274,24 +259,24 @@ module tpu_core #(
     ) sys_inst (
         .clk(clk),
         .rst(rst),
-        // A-Flow (Input, Left) [cite: 211-215]
+        // A-Flow (Input, Left)
         .sys_data_in(sys_in_a_skewed),
         .sys_valid_in(sys_val_a_skewed),
         .sys_switch_in(sys_sw_a_skewed),
-        // B-Flow (Weight, Top) [cite: 211-215]
+        // B-Flow (Weight, Top)
         .sys_weight_in(sys_in_b_skewed),
         .sys_index_in(sys_idx_b_skewed),
         .sys_accept_w_in(sys_acc_b_skewed),
-        // Controls [cite: 211-215]
-        .sys_enable_rows(ctrl_row_mask), // K
-        .sys_enable_cols(ctrl_col_mask), // N
-        // Output [cite: 211-215]
+        // Controls
+        .sys_enable_rows(ctrl_row_mask),
+        .sys_enable_cols(ctrl_col_mask),
+        // Output
         .sys_data_out(sys_out_data),
         .sys_valid_out(sys_out_valid)
     );
 
     // ========================================================================
-    // 模块 6: VPU (Vector Processing Unit)
+    // 模块 6: VPU (Vector Processing Unit) - Modified
     // ========================================================================
     vpu #(
         .VPU_WIDTH(W),
@@ -300,14 +285,13 @@ module tpu_core #(
         .clk(clk),
         .rst(rst),
         .vpu_mode(ctrl_vpu_mode),
-        // 来自 Systolic 的 E 矩阵 [cite: 177-182]
+        // Systolic Result
         .vpu_sys_data_in(sys_out_data),
         .vpu_sys_valid_in(sys_out_valid),
-        // 来自 Input Buffer (经 C-Skew) 的 C 矩阵
+        // Bias Input (Skewed)
         .vpu_bias_data_in(sys_in_c_skewed),
-        // (*** 已修改: 移除了 vpu_bias_valid_in 端口 ***)
-        
-        // 输出 (未对齐)
+        .vpu_bias_valid_in(sys_val_c_skewed), // [NEW] 连接 Valid 延迟链
+        // Output
         .vpu_data_out(vpu_out_data),
         .vpu_valid_out(vpu_out_valid)
     );
@@ -315,25 +299,25 @@ module tpu_core #(
     // ========================================================================
     // 逻辑 7: Output De-skew Logic (输出对齐)
     // ========================================================================
+    // VPU 每一列的输出时间不同 (第 j 列比第 0 列晚 j 个周期)
+    // 目标: 对第 j 列再次延迟 (W-1-j) 个周期，使得所有列在同一时刻对齐，方便打包写入 Buffer
     logic [W-1:0] aligned_valid_pipe;
-    
     genvar i_dsk;
     generate
         for (i_dsk = 0; i_dsk < W; i_dsk++) begin : deskew_gen
             localparam int DELAY = (W - 1) - i_dsk;
-
             if (DELAY == 0) begin
-                // 最后一列 (j=15): 不延迟
+                // 最后一列 (j=15): 无需等待，直接通过
                 assign aligned_wr_data[i_dsk]    = vpu_out_data[i_dsk];
                 assign aligned_valid_pipe[i_dsk] = vpu_out_valid[i_dsk];
             end else begin
                 logic signed [DATA_WIDTH_ACCUM-1:0] pipe_data [DELAY];
                 logic                               pipe_valid [DELAY];
-                
                 always_ff @(posedge clk) begin
                     if (rst) begin
                         for(int d=0; d<DELAY; d++) begin
-                            pipe_data[d] <= '0; pipe_valid[d] <= '0;
+                            pipe_data[d] <= '0;
+                            pipe_valid[d] <= '0;
                         end
                     end else begin
                         pipe_data[0]  <= vpu_out_data[i_dsk];
@@ -350,18 +334,19 @@ module tpu_core #(
         end
     endgenerate
 
-    // 最终写使能: 必须所有 *被启用* (Masked) 的列都已对齐且有效
+    // 最终写使能逻辑: 
+    // 只有当被掩码启用(Masked)的所有列都输出 Valid 时，才认为这一行数据准备好了
     logic [W-1:0] masked_valid_pipe;
     genvar i_vld;
     generate
         for (i_vld = 0; i_vld < W; i_vld++) begin
-            // 如果该列被禁用 (mask=0), 则我们 "不在乎" 它的 valid, 强行置 1
-            // 如果该列被启用 (mask=1), 则我们 "关心" 它的 valid
+            // 如果 col_mask[i] 是 0 (该列被禁用)，则我们强行认为它 Valid (不在乎它的状态)
+            // 如果 col_mask[i] 是 1 (该列启用)，则必须等待 aligned_valid_pipe 为 1
             assign masked_valid_pipe[i_vld] = aligned_valid_pipe[i_vld] | (~ctrl_col_mask[i_vld]);
         end
     endgenerate
     
-    assign aligned_wr_valid = &masked_valid_pipe; // AND-Reduction
+    assign aligned_wr_valid = &masked_valid_pipe; // AND-Reduction: 所有列就绪
     assign core_writeback_valid = aligned_wr_valid;
 
 endmodule
