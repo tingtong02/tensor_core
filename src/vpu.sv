@@ -2,23 +2,12 @@
 `default_nettype none
 
 /**
- * 向量处理单元 (VPU) Top Module - Enhanced
- * 功能: 后处理流水线，支持模式选择
- * * vpu_mode 定义 (Bitmask):
- * [0]: Enable Bias Add (1=Enable, 0=Bypass)
- * [1]: Enable ReLU    (1=Enable, 0=Bypass) [预留]
- * [2]: Enable Quant   (1=Enable, 0=Bypass) [预留]
+ * 模块名: vpu (Vector Processing Unit) - Modified
+ * 功能: 执行 D = E + C 等后处理操作
+ * 修改逻辑:
+ * - 引入 vpu_bias_valid_in 确保数据对齐安全性。
+ * - 实现了 Valid 信号的“与”操作，防止无效数据污染结果。
  */
-
-/*
-!如果在时钟上升沿到来时，这两个数据没有同时出现在端口上
-例如 $E$ 到了，但 $C$ 还没到，或者 $C$ 早到了
-!加法器就会计算出错误的结果
-$E + \text{Garbage}$ 或 $\text{Garbage} + C$
-!由于 VPU 内部没有设计 FIFO（先进先出队列） 来缓冲或对齐数据，这种同步责任完全转移给了外部控制器。
-!如果更改pe为2 stage，那么这里将会很麻烦，对于控制器时序要求很高
-*/
-
 module vpu #(
     parameter int VPU_WIDTH     = 16,
     parameter int DATA_WIDTH_IN = 32
@@ -27,97 +16,73 @@ module vpu #(
     input logic rst,
 
     // --- 控制信号 ---
-    // 用于选择计算模式
+    // [0]: Enable Bias Add (1=Enable, 0=Bypass)
     input logic [2:0] vpu_mode, 
 
-    // --- 数据输入 ---
+    // --- 数据输入 (来自 Systolic Array) ---
     input logic signed [DATA_WIDTH_IN-1:0] vpu_sys_data_in  [VPU_WIDTH],
     input logic                            vpu_sys_valid_in [VPU_WIDTH],
 
-    // --- Bias 输入 (UB) ---
+    // --- Bias 输入 (来自 Input Buffer/Skew Logic) ---
     input logic signed [DATA_WIDTH_IN-1:0] vpu_bias_data_in [VPU_WIDTH],
+    input logic                            vpu_bias_valid_in [VPU_WIDTH], // [NEW] 新增 Bias 有效性输入
 
-    // --- 数据输出 ---
+    // --- 数据输出 (去往 De-skew Logic) ---
     output logic signed [DATA_WIDTH_IN-1:0] vpu_data_out  [VPU_WIDTH],
     output logic                            vpu_valid_out [VPU_WIDTH]
 );
-
-    // --- 流水线级间信号 ---
-    // Stage 1 (Bias) 的原始输出
-    logic signed [DATA_WIDTH_IN-1:0] s1_bias_result [VPU_WIDTH];
-    logic                            s1_bias_valid  [VPU_WIDTH];
-
-    // // Stage 1 最终输出 (经过 MUX 选择后)
-    // logic signed [DATA_WIDTH_IN-1:0] s1_final_data  [VPU_WIDTH];
-    // logic                            s1_final_valid [VPU_WIDTH];
 
     genvar j;
     generate
         for (j = 0; j < VPU_WIDTH; j++) begin : vpu_lane_gen
             
+            // --- 内部信号声明 ---
+            logic signed [DATA_WIDTH_IN-1:0] bias_result_data;
+            logic                            bias_result_valid;
+
             // ============================================================
-            // STAGE 1: Bias Addition Unit
+            // 1. 安全校验逻辑 (Valid Gating)
+            // ============================================================
+            // 核心修改: 创建一个合并的 Valid 信号。
+            // 逻辑: 只有当 脉动阵列输出(Psum) 和 偏置输入(Bias) 在同一时刻都有效时，
+            //       我们才将此视为有效的计算请求。
+            // 效果: 如果 Control Unit 的时序稍有偏差（例如 Bias 晚到一拍），
+            //       combined_valid_in 将为 0，bias_child 会输出无效 (0)，
+            //       从而保护 Output Buffer 不被写入错误的计算结果。
+            logic combined_valid_in;
+            assign combined_valid_in = vpu_sys_valid_in[j] && vpu_bias_valid_in[j];
+
+            // ============================================================
+            // 2. Bias 加法单元 (Stage 1)
             // ============================================================
             bias_child #(
                 .DATA_WIDTH(DATA_WIDTH_IN)
             ) bias_inst (
                 .clk(clk),
                 .rst(rst),
-                .bias_sys_data_in(vpu_sys_data_in[j]),
-                .bias_sys_valid_in(vpu_sys_valid_in[j]),
-                .bias_scalar_in(vpu_bias_data_in[j]),
-                .bias_z_data_out(s1_bias_result[j]),
-                .bias_Z_valid_out(s1_bias_valid[j])
+                
+                // 数据端口
+                .bias_sys_data_in(vpu_sys_data_in[j]),   // E 矩阵元素
+                .bias_scalar_in(vpu_bias_data_in[j]),    // C 矩阵元素
+
+                // 控制端口 [关键修改]
+                // 将合并后的 Valid 信号传入子模块。
+                // 子模块内部逻辑是: always_ff @(posedge clk) if (valid_in) valid_out <= 1;
+                // 这意味着只有两者都有效，下一拍的输出才会有效。
+                .bias_sys_valid_in(combined_valid_in),   
+
+                // 输出端口
+                .bias_z_data_out(bias_result_data),      // D 矩阵元素 (Stage 1结果)
+                .bias_Z_valid_out(bias_result_valid)
             );
 
             // ============================================================
-            // STAGE 1 MUX: 选择逻辑 (Bypass Logic)
+            // 3. 输出分配
             // ============================================================
-            // 如果 vpu_mode[0] == 1, 选择 Bias 计算结果
-            // 如果 vpu_mode[0] == 0, 直接旁路输入数据 (不做加法)
-            // 注意：如果选择旁路，我们需要手动对齐时延(Delay)，
-            // 或者在这个简单设计中，我们可以接受旁路路径少一拍延迟。
-            // 但在高性能设计中，通常建议旁路路径也要经过一个寄存器以保持对齐。
-            
-            // 这里为了保持流水线整洁，最简单的做法是：
-            // 无论是否 bypass，数据都流经 bias_child，
-            // 所谓的 "Bypass" 可以在软件层面通过将 Bias 输入置为 0 来实现。
-            
-            // 但如果您坚持要硬件 MUX 选择 (例如为了省功耗或特殊路由):
-            /*
-            assign s1_final_data[j] = (vpu_mode[0]) ? s1_bias_result[j] : vpu_sys_data_in[j];
-            assign s1_final_valid[j] = (vpu_mode[0]) ? s1_bias_valid[j] : vpu_sys_valid_in[j];
-            */
-
-            // **架构师建议：**
-            // 对于 "加法" 这种操作，硬件 MUX 其实不如 **"软件置零"** 高效。
-            // 如果不想加 Bias，只需让 UB 送入的 `vpu_bias_data_in` 全为 0 即可。
-            // 这样可以省去 MUX 的延迟和面积，且流水线极其规整。
-            
-            // 但是，对于 **ReLU** 这种非线性操作，您**必须**要有 MUX。
-            // 下面演示 ReLU 的 MUX 写法：
-
-            // ============================================================
-            // [预留] STAGE 2: ReLU
-            // ============================================================
-            /*
-            logic signed [31:0] relu_raw_out;
-            logic relu_raw_valid;
-
-            relu_child relu_inst (..., .in(s1_bias_result[j]), .out(relu_raw_out)...);
-
-            // MUX:
-            // vpu_mode[1]==1 : 使用 ReLU 结果
-            // vpu_mode[1]==0 : 使用 Stage 1 结果 (直通)
-            assign s2_final_data[j] = (vpu_mode[1]) ? relu_raw_out : s1_bias_result[j];
-            */
-
-            // ============================================================
-            // FINAL OUTPUT
-            // ============================================================
-            // 目前直接输出 Stage 1 结果
-            assign vpu_data_out[j]  = s1_bias_result[j];
-            assign vpu_valid_out[j] = s1_bias_valid[j];
+            // 可以在这里添加额外的 MUX 逻辑处理 vpu_mode (如 ReLU)
+            // 目前直接输出 Bias 加法结果
+            assign vpu_data_out[j]  = bias_result_data;
+            assign vpu_valid_out[j] = bias_result_valid;
 
         end
     endgenerate
