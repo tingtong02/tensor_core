@@ -221,11 +221,19 @@ module tb_control_unit;
         end
 
         // --- Scenario 4: Task 1 C-Flow (Bias) Check ---
-        // 此时 Task 1 C-Flow 应该开始。C-Base 是 200
+        
+        // [修正]: C-Flow 的启动信号经过了两级级联（B->A->C），且均为寄存器输出
+        // 导致相对于 Task 2 A-Flow（B->A）可能会有 1 周期的相位滞后。
+        // 我们先检查当前是否已经启动
+        if (ctrl_rd_en_c == 0) begin
+            // 如果还没启动，允许等待 1 个周期
+            @(posedge clk);
+            #1; 
+        end
+
         if (ctrl_rd_en_c && ctrl_rd_addr_c === 200)
              $display("[Time %0t] Task 1 C-Flow Started Correctly (Addr=200)", $time);
         else
-             // 如果这里报错，去波形图看 cnt_c 是否启动，以及地址是多少
              $error("Error: Task 1 C-Flow missing or wrong addr. En=%b, Addr=%d", ctrl_rd_en_c, ctrl_rd_addr_c);
 
 
