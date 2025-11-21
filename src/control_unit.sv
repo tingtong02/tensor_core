@@ -225,7 +225,7 @@ module control_unit #(
                 end
             end else begin
                 // Logic
-                if (cnt_a < W - 1) begin // 0..14 (next is 1..15)
+                if (cnt_a < W) begin 
                     ctrl_rd_en_a   <= 1'b1;
                     ctrl_rd_addr_a <= ctrl_rd_addr_a + 1'b1;
                 end else begin // 15 & 16
@@ -292,7 +292,7 @@ module control_unit #(
                 end
             end else begin
                 // Logic
-                if (cnt_c < W - 1) begin
+                if (cnt_c < W) begin
                     ctrl_rd_en_c   <= 1'b1;
                     ctrl_rd_addr_c <= ctrl_rd_addr_c + 1'b1;
                 end else begin

@@ -181,6 +181,7 @@ module tb_control_unit;
         // ctrl_rd_en_a 已经在上一个时钟沿拉高 (T=Cycle 17 start)
         // ctrl_a_valid 应该在下一个时钟沿拉高 (T=Cycle 18 start)
         @(posedge clk); 
+        #1; // [新增] 等待信号稳定
         if (ctrl_a_valid == 1 && ctrl_rd_en_a == 1) 
             $display("[Time %0t] SUCCESS: A-Flow Valid Aligned (Delayed by 1 cycle)", $time);
         else 
@@ -195,7 +196,16 @@ module tb_control_unit;
         
         // Gap Cycle for A (Task 1)
         @(posedge clk); 
-        if (ctrl_rd_en_a) $error("Error: A-Flow Gap missing");
+        // [删除/注释掉] 这行代码，因为无缝衔接时 Gap 消失了
+        // if (ctrl_rd_en_a) $error("Error: A-Flow Gap missing");
+
+        // [改为] 检查 Task 2 是否无缝接管
+        #1;
+        if (ctrl_rd_en_a == 1 && ctrl_rd_addr_a == 16) begin // Task 2 A-Base is 16
+             $display("[Time %0t] SUCCESS: A-Flow Seamlessly Transformed to Task 2 (Addr=16)", $time);
+        end else begin
+             $error("Error: A-Flow did not transition to Task 2 correctly. En=%b, Addr=%d", ctrl_rd_en_a, ctrl_rd_addr_a);
+        end
 
         // --- Scenario 3: Task 2 A-Flow Starts ---
         // 此时 Task 2 的 A-Flow 应该开始 (Task 1 A 结束后的下一拍)
@@ -211,12 +221,12 @@ module tb_control_unit;
         end
 
         // --- Scenario 4: Task 1 C-Flow (Bias) Check ---
-        // Task 1 C-Flow 应该在 Task 1 A-Flow 结束后立即开始 (Gap 之后)
-        // 当前时刻应该是 Task 1 C 开始，Task 2 A 开始
+        // 此时 Task 1 C-Flow 应该开始。C-Base 是 200
         if (ctrl_rd_en_c && ctrl_rd_addr_c === 200)
              $display("[Time %0t] Task 1 C-Flow Started Correctly (Addr=200)", $time);
         else
-             $error("Error: Task 1 C-Flow missing or wrong address");
+             // 如果这里报错，去波形图看 cnt_c 是否启动，以及地址是多少
+             $error("Error: Task 1 C-Flow missing or wrong addr. En=%b, Addr=%d", ctrl_rd_en_c, ctrl_rd_addr_c);
 
 
         // --- Scenario 5: Writeback Simulation ---
