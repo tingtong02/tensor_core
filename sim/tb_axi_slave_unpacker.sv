@@ -144,29 +144,37 @@ module tb_axi_slave_unpacker;
         #50; rst = 0; #20;
 
         $display("=== Test 1: Int8 Padding Mode (Single Row) ===");
+        // 配置: Int8, Addr=0
+        // 目标: 填满一行 SRAM (16个 int8)。
+        // AXI Width=64bit (8 bytes/beat) -> 需要 2 beats (len=1)
+        
         cfg_data_type_is_int32 = 0; 
         
         fork
             begin
+                // AW Channel
                 axi_send_addr(32'h0000_0000, 8'd1); 
             end
             begin
+                // W Channel
                 axi_send_data_burst(1, 1, 0); 
             end
             begin
+                // B Channel
                 axi_recv_resp();
             end
-            // [修正]: 增加第 4 个并行线程进行监控
             begin
-                // 等待脉冲
+                // Monitor (Parallel Check)
                 wait(host_wr_en == 1);
+                #1; // [关键修复] 消除竞争
+                
                 $display("[SRAM WR] Addr: %h", host_wr_addr);
                 
                 // 检查地址
                 if (host_wr_addr !== 0) $error("Address Mismatch! Expected 0");
                 
                 // 检查数据补零 (0x01 -> 0x00000001)
-                if (host_wr_data[0] === 32'h0000_0001) 
+                if (host_wr_data[0] === 32'h0000_0001 && host_wr_data[1] === 32'h0000_0002) 
                     $display("[DATA PASS] Int8 0x01 correctly padded to 0x00000001");
                 else
                     $error("[DATA FAIL] Padding incorrect. Got %h", host_wr_data[0]);
@@ -177,6 +185,10 @@ module tb_axi_slave_unpacker;
 
 
         $display("=== Test 2: Int32 Passthrough Mode (Single Row) ===");
+        // 配置: Int32, Addr=0x40 (64, 即第2行)
+        // 目标: 填满一行 SRAM (16个 int32)。
+        // AXI Width=64bit (2 words/beat) -> 需要 8 beats (len=7)
+        
         cfg_data_type_is_int32 = 1;
         #20;
 
@@ -185,19 +197,23 @@ module tb_axi_slave_unpacker;
                 axi_send_addr(32'h0000_0040, 8'd7); 
             end
             begin
-                axi_send_data_burst(7, 100, 1); 
+                axi_send_data_burst(7, 100, 1); // Start val 100, mode 1
             end
             begin
                 axi_recv_resp();
             end
-            // [修正]: 同样增加监控线程
             begin
+                // Monitor
                 wait(host_wr_en == 1);
+                #1; // [关键修复]
+                
                 $display("[SRAM WR] Addr: %h", host_wr_addr);
                 
-                if (host_wr_addr !== 1) $error("Address Mismatch! Expected 1");
+                // 检查是否为 1 (第2行)
+                if (host_wr_addr !== 1) $error("Address Mismatch! Expected 1 (Row 1)");
 
-                if (host_wr_data[0] === 100) 
+                // 检查数据透传
+                if (host_wr_data[0] === 100 && host_wr_data[1] === 101) 
                     $display("[DATA PASS] Int32 Passthrough correct.");
                 else
                     $error("[DATA FAIL] Data mismatch.");
@@ -210,7 +226,7 @@ module tb_axi_slave_unpacker;
         $display("=== Test 3: Burst Across Rows (Int8 Mode) ===");
         // 配置: Int8
         // 目标: 一次写 2 行 (32个元素)。
-        // 需要 32 bytes / 8 bytes-per-beat = 4 beats
+        // 需要 32 bytes / 8 bytes-per-beat = 4 beats (len=3)
         // 将会产生 2 次 host_wr_en 脉冲 (Row 2 和 Row 3)
         
         cfg_data_type_is_int32 = 0;
@@ -218,7 +234,7 @@ module tb_axi_slave_unpacker;
 
         fork
             begin
-                axi_send_addr(32'h0000_0080, 8'd3); // Len=3 (4 beats) -> Row 2 start
+                axi_send_addr(32'h0000_0080, 8'd3); 
             end
             begin
                 axi_send_data_burst(3, 10, 0); 
@@ -227,17 +243,25 @@ module tb_axi_slave_unpacker;
                 axi_recv_resp();
             end
             begin
-                // Monitor SRAM Write
-                // Expect Row 2 write
+                // --- Burst Beat 1 ---
                 wait(host_wr_en == 1);
+                #1;
                 $display("[SRAM WR BURST 1] Addr: %h (Expected 2)", host_wr_addr);
                 if (host_wr_addr !== 2) $error("Burst Addr 1 Fail");
-                @(posedge clk); 
                 
-                // Expect Row 3 write
+                // [关键修复]：必须等待当前脉冲结束 (变低)
+                // 否则下一个 wait(en==1) 会立即触发 (Double Sampling)
+                wait(host_wr_en == 0); 
+                
+                // --- Burst Beat 2 ---
                 wait(host_wr_en == 1);
+                #1;
                 $display("[SRAM WR BURST 2] Addr: %h (Expected 3)", host_wr_addr);
-                if (host_wr_addr !== 3) $error("Burst Addr 2 Fail");
+                
+                // 这里之前报错 Got 002，是因为重复采样了 Beat 1
+                // 现在应该能正确采到 003
+                if (host_wr_addr !== 3) $error("Burst Addr 2 Fail. Got: %h", host_wr_addr);
+                
                 @(posedge clk);
             end
         join
