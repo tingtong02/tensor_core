@@ -126,14 +126,8 @@ module control_unit #(
     assign busy = !fifo_empty || b_active || a_active || c_active || d_task_active || (dq_cnt != 0);
 
     // ========================================================================
-    // Stage B (Master) - 权重加载
+    // Stage B (Master) - 权重加载 (已修正时序)
     // ========================================================================
-    // Requirement: 
-    // t=0..W-1 Read
-    // t=W Check & Trigger A
-    
-    command_t   curr_cmd_b;
-
     always_ff @(posedge clk) begin
         if (rst) begin
             cnt_b <= 0;
@@ -157,14 +151,13 @@ module control_unit #(
             end else begin
                 // --- ACTIVE 状态 ---
                 
-                // 1. 读使能逻辑
+                // 1. 读使能逻辑 (0..15)
                 if (cnt_b == 0) begin
-                    // 刚从 IDLE 进来，或者刚 Loop 回来
-                    curr_cmd_b <= fifo_dout; // 锁存指令
+                    curr_cmd_b <= fifo_dout; 
                     ctrl_rd_en_b   <= 1'b1;
                     ctrl_rd_addr_b <= fifo_dout.addr_b; 
                 end 
-                else if (cnt_b < W) begin // 1..15
+                else if (cnt_b < W) begin 
                     ctrl_rd_en_b   <= 1'b1;
                     ctrl_rd_addr_b <= curr_cmd_b.addr_b + ADDR_WIDTH'(cnt_b);
                 end 
@@ -172,50 +165,26 @@ module control_unit #(
                     ctrl_rd_en_b <= 1'b0;
                 end
 
-                // 2. 计数器流转与决策逻辑 (修改点 1)
+                // 2. 计数器流转与决策逻辑
                 if (cnt_b < W) begin
                     cnt_b <= cnt_b + 1'b1;
-                    
-                    // [重要修改] 提前一拍触发 A
-                    // 当 cnt_b 为 15 (W-1) 时触发，下一拍 t=W A 收到，t=W+1 A 输出读信号
-                    if (cnt_b == (W - 1)) begin
-                        trigger_a_start <= 1'b1;
-                        cmd_info_for_a  <= curr_cmd_b;
-                    end
                 end 
                 else begin 
                     // cnt_b == 16 (Gap 周期)
-                    // 此时 A 已经收到了触发并在准备启动
-                    // B 需要决定是 Loop 还是回 IDLE
+                    // [修正点] 在 Gap 周期触发 A，确保间隔为 17 周期
+                    trigger_a_start <= 1'b1;
+                    cmd_info_for_a  <= curr_cmd_b;
                     
                     if (!fifo_empty) begin
                         // 有新指令 -> Loop
                         fifo_rd_en <= 1;
-                        cnt_b      <= 0; // 直接回 0
-                        // b_active 保持 1
+                        cnt_b      <= 0; 
                     end else begin
                         // 无指令 -> IDLE
                         b_active <= 0;
-                        cnt_b    <= 0; // Reset
+                        cnt_b    <= 0; 
                     end
                 end
-            end
-        end
-    end
-
-    // B-Core Control Generation
-    // t=1..W Valid
-    always_ff @(posedge clk) begin
-        if (rst) begin
-            ctrl_b_accept_w <= 0;
-            ctrl_b_weight_index <= 0;
-        end else begin
-            ctrl_b_accept_w <= ctrl_rd_en_b;
-            if (ctrl_rd_en_b) begin
-                if (cnt_b == 0) 
-                     ctrl_b_weight_index <= ($clog2(W))'(W - 1);
-                else 
-                     ctrl_b_weight_index <= ctrl_b_weight_index - 1'b1;
             end
         end
     end
