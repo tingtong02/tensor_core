@@ -25,7 +25,7 @@ module output_buffer #(
     // ========================================================================
     input logic [ADDR_WIDTH-1:0] wr_addr, // 来自 Control Unit
     input logic                  wr_en,   // 来自 tpu_core 的 aligned_wr_valid
-    input logic [DATA_WIDTH-1:0] wr_data [SYSTOLIC_ARRAY_WIDTH], // 来自 tpu_core
+    input logic signed [DATA_WIDTH-1:0] wr_data [SYSTOLIC_ARRAY_WIDTH], // 来自 tpu_core
 
     // ========================================================================
     // 读端口 (Port R)
@@ -33,7 +33,7 @@ module output_buffer #(
     // ========================================================================
     input logic [ADDR_WIDTH-1:0]  rd_addr, // 来自 AXI Master FSM
     input logic                   rd_en,   // 来自 AXI Master FSM
-    output logic [DATA_WIDTH-1:0] rd_data [SYSTOLIC_ARRAY_WIDTH]  // 数组接口
+    output logic signed [DATA_WIDTH-1:0] rd_data [SYSTOLIC_ARRAY_WIDTH]  // 数组接口
 );
 
     // ------------------------------------------------------------------------
