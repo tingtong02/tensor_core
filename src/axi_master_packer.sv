@@ -23,7 +23,7 @@ module axi_master_packer #(
     // SRAM Read
     output logic [ADDR_WIDTH-1:0]      rd_addr,
     output logic                       rd_en,
-    input  logic [SRAM_DATA_WIDTH-1:0] rd_data [ARRAY_WIDTH], 
+    input  logic [SRAM_DATA_WIDTH-1:0] rd_data [ARRAY_WIDTH],  //vivado报错，需要加signed
 
     // AXI4 Master Write
     output logic [31:0]             awaddr,
