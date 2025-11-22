@@ -34,7 +34,7 @@ module input_buffer #(
     // ========================================================================
     input logic [ADDR_WIDTH-1:0]  rd_addr_a,
     input logic                   rd_en_a,
-    output logic [DATA_WIDTH-1:0] rd_data_a [SYSTOLIC_ARRAY_WIDTH], 
+    output logic signed [DATA_WIDTH-1:0] rd_data_a [SYSTOLIC_ARRAY_WIDTH], 
 
     // ========================================================================
     // 读端口 B (Port B)
@@ -42,7 +42,7 @@ module input_buffer #(
     // ========================================================================
     input logic [ADDR_WIDTH-1:0]  rd_addr_b,
     input logic                   rd_en_b,
-    output logic [DATA_WIDTH-1:0] rd_data_b [SYSTOLIC_ARRAY_WIDTH], 
+    output logic signed [DATA_WIDTH-1:0] rd_data_b [SYSTOLIC_ARRAY_WIDTH], 
 
     // ========================================================================
     // 读端口 C (Port C)
@@ -50,7 +50,7 @@ module input_buffer #(
     // ========================================================================
     input logic [ADDR_WIDTH-1:0]  rd_addr_c,
     input logic                   rd_en_c,
-    output logic [DATA_WIDTH-1:0] rd_data_c [SYSTOLIC_ARRAY_WIDTH]  
+    output logic signed [DATA_WIDTH-1:0] rd_data_c [SYSTOLIC_ARRAY_WIDTH]  
 );
 
     // ------------------------------------------------------------------------
