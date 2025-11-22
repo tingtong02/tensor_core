@@ -138,6 +138,8 @@ module axi_slave_unpacker #(
                         
                         logic [4:0] next_count;
                         int elems_added;
+                        logic [7:0] current_byte; // 声明移到这里
+
                         elems_added = 0; // 临时变量
 
                         if (!cfg_data_type_is_int32) begin
@@ -147,7 +149,12 @@ module axi_slave_unpacker #(
                             for (int i = 0; i < ELEMS_PER_BEAT_INT8; i++) begin
                                 if ((elem_count + i) < ARRAY_WIDTH) begin
                                     // Extract byte, Zero Extend to 32b
-                                    row_buffer[elem_count + i] <= {24'b0, wdata[i*8 +: 8]};
+                                    
+                                    // 1. 提取当前字节
+                                    current_byte = wdata[i*8 +: 8];                            
+                                    // 拼接: {24个符号位, 8位数据}
+                                    // {{24{current_byte[7]}}, current_byte}
+                                    row_buffer[elem_count + i] <= {{24{current_byte[7]}}, current_byte};
                                 end
                             end
                             elems_added = ELEMS_PER_BEAT_INT8;
