@@ -29,7 +29,7 @@ module tpu_core #(
     // ========================================================================
     input logic [ADDR_WIDTH-1:0]       axim_rd_addr_in,
     input logic                        axim_rd_en_in,
-    output logic [DATA_WIDTH_ACCUM-1:0] axim_rd_data_out [SYSTOLIC_ARRAY_WIDTH],
+    output logic [DATA_WIDTH_ACCUM-1:0] axim_rd_data_out [SYSTOLIC_ARRAY_WIDTH], //vivado报错需要加signed
 
     // ========================================================================
     // 3. Control Unit 接口 (控制信号)
