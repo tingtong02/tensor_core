@@ -101,7 +101,9 @@ module control_unit #(
     logic       trigger_d_queue; 
     command_t   cmd_info_for_d;
 
-    assign busy = !fifo_empty; 
+    // assign busy = !fifo_empty; 
+    // 修改 control_unit.sv
+    assign busy = !fifo_empty || b_active || a_active || c_active || d_task_active || (dq_cnt != 0);
 
     // ========================================================================
     // Stage B (Master) - 权重加载
