@@ -68,9 +68,9 @@ module tpu_core #(
     localparam W = SYSTOLIC_ARRAY_WIDTH;
 
     // --- 内部连线: Buffer 读出 (32-bit) ---
-    logic [DATA_WIDTH_ACCUM-1:0] ib_rd_a [W];
-    logic [DATA_WIDTH_ACCUM-1:0] ib_rd_b [W];
-    logic [DATA_WIDTH_ACCUM-1:0] ib_rd_c [W];
+    logic signed [DATA_WIDTH_ACCUM-1:0] ib_rd_a [W];
+    logic signed [DATA_WIDTH_ACCUM-1:0] ib_rd_b [W];
+    logic signed [DATA_WIDTH_ACCUM-1:0] ib_rd_c [W];
 
     // --- 内部连线: 截断 (32b -> 8b) ---
     logic signed [DATA_WIDTH_IN-1:0] sys_in_a_raw [W];
