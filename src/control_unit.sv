@@ -8,7 +8,7 @@ module control_unit #(
     input logic clk,
     input logic rst,
 
-    // --- 1. Host Command Interface ---
+    // --- 1. 主机命令接口 (Host Command Interface) ---
     input logic        cmd_valid,
     input logic [63:0] cmd_data,
     output logic       cmd_ready, 
@@ -16,20 +16,21 @@ module control_unit #(
     output logic       busy,      
     output logic       done_irq,  
 
-    // --- 2. TPU Core Control Interfaces ---
-    // Stage A (Input)
+    // --- 2. TPU 核心控制接口 (TPU Core Control Interfaces) ---
+    
+    // Stage A (Input Activations)
     output logic [ADDR_WIDTH-1:0] ctrl_rd_addr_a,
     output logic                  ctrl_rd_en_a,
     output logic                  ctrl_a_valid,  
     output logic                  ctrl_a_switch, 
     
-    // Stage B (Weight)
+    // Stage B (Weights)
     output logic [ADDR_WIDTH-1:0] ctrl_rd_addr_b,
     output logic                  ctrl_rd_en_b,
     output logic                  ctrl_b_accept_w, 
     output logic [$clog2(SYSTOLIC_ARRAY_WIDTH)-1:0] ctrl_b_weight_index, 
 
-    // Stage C (Bias/Accumulator)
+    // Stage C (Bias / Accumulators)
     output logic [ADDR_WIDTH-1:0] ctrl_rd_addr_c,
     output logic                  ctrl_rd_en_c,
     output logic                  ctrl_c_valid,    
@@ -78,7 +79,8 @@ module control_unit #(
     always_ff @(posedge clk) begin
         if (rst) begin
             wr_ptr <= 0;
-            rd_ptr <= 0; fifo_count <= 0;
+            rd_ptr <= 0; 
+            fifo_count <= 0;
         end else begin
             if (cmd_valid && !fifo_full) begin
                 mem_fifo[wr_ptr] <= cmd_data;
@@ -96,7 +98,7 @@ module control_unit #(
     end
 
     // ========================================================================
-    // 级联触发信号
+    // 级联触发信号与状态定义
     // ========================================================================
     logic       trigger_a_start;
     command_t   cmd_info_for_a; 
@@ -107,27 +109,28 @@ module control_unit #(
     logic       trigger_d_queue; 
     command_t   cmd_info_for_d;
 
-    // Stage Status
-    logic [4:0] cnt_b;
-    logic       b_active;
+    // 给状态机变量赋初始值 = 0，防止仿真初期出现不定态 (X)
+    logic [4:0] cnt_b = 0;
+    logic       b_active = 0;
     
-    logic [4:0] cnt_a;
-    logic       a_active;
+    logic [4:0] cnt_a = 0;
+    logic       a_active = 0;
     
-    logic [4:0] cnt_c;
-    logic       c_active;
+    logic [4:0] cnt_c = 0;
+    logic       c_active = 0;
     
-    // D Stage signals declaration
-    logic [1:0] dq_wr, dq_rd;
-    logic [2:0] dq_cnt;
-    logic       d_task_active;
+    // D Stage 信号
+    logic [1:0] dq_wr = 0, dq_rd = 0;
+    logic [2:0] dq_cnt = 0;
+    logic       d_task_active = 0;
 
-    // Busy logic: 任何阶段忙或队列不空则忙
+    // Busy: 只要有任何子模块在忙，或者任务队列里有东西，模块就忙
     assign busy = !fifo_empty || b_active || a_active || c_active || d_task_active || (dq_cnt != 0);
 
     // ========================================================================
-    // Stage B (Master) - 权重加载 (已修正时序)
+    // Stage B (Master) - 权重加载
     // ========================================================================
+    // 时序目标: t=0..15 读, t=16 Gap, t=17 Stage A 启动
     command_t   curr_cmd_b;
 
     always_ff @(posedge clk) begin
@@ -155,11 +158,12 @@ module control_unit #(
                 
                 // 1. 读使能逻辑 (0..15)
                 if (cnt_b == 0) begin
+                    // 刚开始或 Loop 回来
                     curr_cmd_b <= fifo_dout; 
                     ctrl_rd_en_b   <= 1'b1;
                     ctrl_rd_addr_b <= fifo_dout.addr_b; 
                 end 
-                else if (cnt_b < W) begin 
+                else if (cnt_b < W) begin // 1..15
                     ctrl_rd_en_b   <= 1'b1;
                     ctrl_rd_addr_b <= curr_cmd_b.addr_b + ADDR_WIDTH'(cnt_b);
                 end 
@@ -167,22 +171,23 @@ module control_unit #(
                     ctrl_rd_en_b <= 1'b0;
                 end
 
-                // 2. 计数器流转与决策逻辑
+                // 2. 计数器流转与触发逻辑
                 if (cnt_b < W) begin
                     cnt_b <= cnt_b + 1'b1;
                 end 
                 else begin 
                     // cnt_b == 16 (Gap 周期)
-                    // [修正点] 在 Gap 周期触发 A，确保间隔为 17 周期
+                    // [修正点] 在这里触发 A。
+                    // B(t=16) 触发 -> A(t=17) 启动。间隔 17 周期。
                     trigger_a_start <= 1'b1;
                     cmd_info_for_a  <= curr_cmd_b;
                     
                     if (!fifo_empty) begin
-                        // 有新指令 -> Loop
+                        // 有新指令 -> Loop，无缝开始下一个任务
                         fifo_rd_en <= 1;
                         cnt_b      <= 0; 
                     end else begin
-                        // 无指令 -> IDLE
+                        // 无指令 -> 回 IDLE
                         b_active <= 0;
                         cnt_b    <= 0; 
                     end
@@ -191,14 +196,28 @@ module control_unit #(
         end
     end
 
+    // B-Core 控制信号生成
+    always_ff @(posedge clk) begin
+        if (rst) begin
+            ctrl_b_accept_w <= 0;
+            ctrl_b_weight_index <= 0;
+        end else begin
+            ctrl_b_accept_w <= ctrl_rd_en_b;
+            // 仅在读使能有效时更新 Index，防止 X 态
+            if (ctrl_rd_en_b) begin
+                if (cnt_b == 0) 
+                     ctrl_b_weight_index <= ($clog2(W))'(W - 1);
+                else 
+                     ctrl_b_weight_index <= ctrl_b_weight_index - 1'b1;
+            end
+        end
+    end
+
     // ========================================================================
     // Stage A (Input) & Switch - Follower 1
     // ========================================================================
-    // Requirement:
-    // Starts at t=W+1 relative to system start
-    // t=0 (local) Switch Pulse
-    // t=0..W-1 Read
-    
+    // 时序目标: 收到 Trigger 后启动，运行 16 周期
+    // 并在倒数第二拍触发 Stage C (无缝衔接)
     command_t   curr_cmd_a;
 
     always_ff @(posedge clk) begin
@@ -218,44 +237,37 @@ module control_unit #(
                     cnt_a <= 0;
                     curr_cmd_a <= cmd_info_for_a;
                     
-                    ctrl_a_switch  <= 1'b1; // Start Pulse (t=W+1 output)
+                    ctrl_a_switch  <= 1'b1; // Start Pulse
                     ctrl_rd_en_a   <= 1'b1;
                     ctrl_rd_addr_a <= cmd_info_for_a.addr_a;
                 end else begin
                     ctrl_rd_en_a <= 0;
                 end
             end else begin
-                // Logic
+                // 读逻辑
                 if (cnt_a < W) begin 
                     ctrl_rd_en_a   <= 1'b1;
-                    ctrl_rd_addr_a <= ctrl_rd_addr_a + 1'b1;
-                end else begin // 15 & 16
+                    ctrl_rd_addr_a <= ctrl_rd_addr_a + 1'b1; // 基于上一拍地址自增
+                end else begin 
                     ctrl_rd_en_a <= 1'b0;
                 end
 
-                // Counter & Decision (修改点 2)
+                // 计数与触发逻辑
                 if (cnt_a < W) begin
                     cnt_a <= cnt_a + 1'b1;
 
-                    // [重要修改] 提前两拍触发 C，以实现无缝衔接
-                    // 我们希望 C 在 t=2W+1 开始读
-                    // A 在 t=W+1 开始读 (cnt_a=0)，t=2W (cnt_a=W-1)
-                    // C 需要在 A 结束读的下一个周期立即开始
-                    // 设置 Trigger 在 cnt_a == W-2 (14)
-                    if (cnt_a == (W - 2)) begin
+                    // 当 cnt_a == 15 (W-1) 时触发，C 将在 A 结束读后的下一拍立即启动
+                    if (cnt_a == (W - 1)) begin
                         trigger_c_start <= 1'b1;
                         cmd_info_for_c  <= curr_cmd_a;
                     end
                 end else begin
                     // cnt_a == 16 (Gap Done)
-                    
-                    // 如果上级(B)已经发来了新的触发信号，说明流水线紧密衔接
                     if (trigger_a_start) begin
-                        // Pipeline Overlap: 收到上级的新触发
+                        // 流水线重叠: 收到上级的新触发，直接重置
                         cnt_a <= 0;
                         curr_cmd_a <= cmd_info_for_a;
-                        
-                        ctrl_a_switch  <= 1'b1; // New Start Pulse
+                        ctrl_a_switch  <= 1'b1; 
                         ctrl_rd_en_a   <= 1'b1;
                         ctrl_rd_addr_a <= cmd_info_for_a.addr_a;
                     end else begin
@@ -267,7 +279,7 @@ module control_unit #(
         end
     end
 
-    // A Valid Generation
+    // A Valid 生成
     always_ff @(posedge clk) begin
         if (rst) ctrl_a_valid <= 0;
         else ctrl_a_valid <= ctrl_rd_en_a;
@@ -276,9 +288,7 @@ module control_unit #(
     // ========================================================================
     // Stage C (Bias) - Follower 2
     // ========================================================================
-    // Requirement:
-    // Starts at t=2W+1 relative to system start (Seamless after A)
-    
+    // 时序目标: 紧跟 A 之后运行
     command_t   curr_cmd_c;
 
     always_ff @(posedge clk) begin
@@ -302,7 +312,7 @@ module control_unit #(
                     ctrl_rd_en_c <= 0;
                 end
             end else begin
-                // Logic
+                // 读逻辑
                 if (cnt_c < W) begin
                     ctrl_rd_en_c   <= 1'b1;
                     ctrl_rd_addr_c <= ctrl_rd_addr_c + 1'b1;
@@ -310,19 +320,18 @@ module control_unit #(
                     ctrl_rd_en_c <= 1'b0;
                 end
 
-                // Counter & Decision
+                // 计数逻辑
                 if (cnt_c < W) begin
                     cnt_c <= cnt_c + 1'b1;
                 end else begin
-                    // cnt_c == 16 (Gap)
-                    // 触发写回任务队列 (D)
+                    // 完成一次 Bias 加载，将任务推入写回队列 D
                     trigger_d_queue <= 1'b1;
                     cmd_info_for_d  <= curr_cmd_c;
 
                     if (trigger_c_start) begin
+                        // Pipeline Overlap
                         cnt_c <= 0;
                         curr_cmd_c <= cmd_info_for_c;
-                        
                         ctrl_rd_en_c   <= 1'b1;
                         ctrl_rd_addr_c <= cmd_info_for_c.addr_c;
                     end else begin
@@ -334,7 +343,7 @@ module control_unit #(
         end
     end
 
-    // C Valid Generation
+    // C Valid 生成
     always_ff @(posedge clk) begin
         if (rst) ctrl_c_valid <= 0;
         else ctrl_c_valid <= ctrl_rd_en_c;
@@ -354,13 +363,13 @@ module control_unit #(
     } d_info_t;
 
     d_info_t d_queue [4];
-    logic       d_task_done;
+    logic       d_task_done = 0;
     d_info_t    curr_d_info;
-    logic [7:0] wb_row_cnt;
+    logic [7:0] wb_row_cnt = 0;
 
     assign done_irq = d_task_done;
 
-    // Queue Manage
+    // 队列管理
     always_ff @(posedge clk) begin
         if (rst) begin
             dq_wr <= 0;
@@ -379,7 +388,7 @@ module control_unit #(
         end
     end
 
-    // WB Logic
+    // 写回逻辑
     always_ff @(posedge clk) begin
         if (rst) begin
             dq_rd <= 0;
@@ -397,11 +406,12 @@ module control_unit #(
                     ctrl_wr_addr_d <= d_queue[dq_rd].addr_d;
                 end
             end else begin
+                // 等待计算核心发出 Writeback Valid 信号
                 if (core_writeback_valid) begin
                     wb_row_cnt <= wb_row_cnt + 1'b1;
                     ctrl_wr_addr_d <= ctrl_wr_addr_d + 1'b1; 
                     
-                    // 始终等待16行，因为 Array 总是吐出 16 行数据
+                    // 始终接收 W (16) 行数据
                     if (wb_row_cnt == (W - 1)) begin
                         d_task_done <= 1;
                         d_task_active <= 0; 
@@ -411,18 +421,18 @@ module control_unit #(
         end
     end
 
-    // Mask Generation
+    // Mask 生成
     always_comb begin
         ctrl_row_mask = '0;
         ctrl_col_mask = '0;
         
-        // Input Row Mask (Based on A command)
+        // 输入行掩码 (由 A 阶段指令决定)
         for (int i = 0; i < W; i++) begin
             if (i < curr_cmd_a.len_k) ctrl_row_mask[i] = 1'b1;
         end
         if (!a_active) ctrl_row_mask = '0;
 
-        // Output Col Mask (Based on D command stored in Writeback stage)
+        // 输出列掩码 (由当前正在写回的 D 任务决定)
         for (int i = 0; i < W; i++) begin
             if (i < curr_d_info.len_n) ctrl_col_mask[i] = 1'b1;
         end
