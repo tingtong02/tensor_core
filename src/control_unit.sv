@@ -22,7 +22,8 @@ module control_unit #(
     output logic [ADDR_WIDTH-1:0] ctrl_rd_addr_a,
     output logic                  ctrl_rd_en_a,
     output logic                  ctrl_a_valid,  
-    output logic                  ctrl_a_switch, 
+    output logic                  ctrl_a_switch,
+    output logic                  ctrl_psum_valid, // [NEW] 新增 Psum Valid 信号
     
     // Stage B (Weights)
     output logic [ADDR_WIDTH-1:0] ctrl_rd_addr_b,
@@ -281,8 +282,13 @@ module control_unit #(
 
     // A Valid 生成
     always_ff @(posedge clk) begin
-        if (rst) ctrl_a_valid <= 0;
-        else ctrl_a_valid <= ctrl_rd_en_a;
+        if (rst) begin
+        ctrl_a_valid <= 0;
+        ctrl_psum_valid <= 0; // [NEW]
+        end else begin
+        ctrl_a_valid <= ctrl_rd_en_a;
+        ctrl_psum_valid <= ctrl_rd_en_a; // [NEW] 逻辑与 A Valid 完全同步
+        end
     end
 
     // ========================================================================
