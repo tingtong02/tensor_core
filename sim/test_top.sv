@@ -41,16 +41,20 @@ module test_top;
     logic                  ctrl_rd_en_a;
     logic                  ctrl_a_valid;
     logic                  ctrl_a_switch;
+    logic                  ctrl_psum_valid; // [NEW] Psum Valid Link
+    
     // B-Flow
     logic [ADDR_WIDTH-1:0] ctrl_rd_addr_b;
     logic                  ctrl_rd_en_b;
     logic                  ctrl_b_accept_w;
     logic [$clog2(W)-1:0]  ctrl_b_weight_index;
+    
     // C-Flow
     logic [ADDR_WIDTH-1:0] ctrl_rd_addr_c;
     logic                  ctrl_rd_en_c;
     logic                  ctrl_c_valid;
     logic [2:0]            ctrl_vpu_mode;
+    
     // D-Flow / Masks / Feedback
     logic [ADDR_WIDTH-1:0] ctrl_wr_addr_d;
     logic [W-1:0]          ctrl_row_mask;
@@ -72,6 +76,7 @@ module test_top;
 
         .ctrl_rd_addr_a(ctrl_rd_addr_a), .ctrl_rd_en_a(ctrl_rd_en_a),
         .ctrl_a_valid(ctrl_a_valid),     .ctrl_a_switch(ctrl_a_switch),
+        .ctrl_psum_valid(ctrl_psum_valid), // [NEW] Connected
 
         .ctrl_rd_addr_b(ctrl_rd_addr_b), .ctrl_rd_en_b(ctrl_rd_en_b),
         .ctrl_b_accept_w(ctrl_b_accept_w), .ctrl_b_weight_index(ctrl_b_weight_index),
@@ -92,14 +97,21 @@ module test_top;
         .ADDR_WIDTH(ADDR_WIDTH)
     ) u_core (
         .clk(clk), .rst(rst),
-        // Host Write (Pre-load data)
+        // Host Write
         .host_wr_addr_in(host_wr_addr_in), .host_wr_en_in(host_wr_en_in), .host_wr_data_in(host_wr_data_in),
-        // AXI Read (Read result)
+        // AXI Read
         .axim_rd_addr_in(axim_rd_addr_in), .axim_rd_en_in(axim_rd_en_in), .axim_rd_data_out(axim_rd_data_out),
-        // Controls from CU
-        .ctrl_rd_addr_a(ctrl_rd_addr_a), .ctrl_rd_en_a(ctrl_rd_en_a), .ctrl_a_valid(ctrl_a_valid), .ctrl_a_switch(ctrl_a_switch),
-        .ctrl_rd_addr_b(ctrl_rd_addr_b), .ctrl_rd_en_b(ctrl_rd_en_b), .ctrl_b_accept_w(ctrl_b_accept_w), .ctrl_b_weight_index(ctrl_b_weight_index),
-        .ctrl_rd_addr_c(ctrl_rd_addr_c), .ctrl_rd_en_c(ctrl_rd_en_c), .ctrl_c_valid(ctrl_c_valid), .ctrl_vpu_mode(ctrl_vpu_mode),
+        // Controls
+        .ctrl_rd_addr_a(ctrl_rd_addr_a), .ctrl_rd_en_a(ctrl_rd_en_a), 
+        .ctrl_a_valid(ctrl_a_valid), .ctrl_a_switch(ctrl_a_switch),
+        .ctrl_psum_valid(ctrl_psum_valid), // [NEW] Connected
+        
+        .ctrl_rd_addr_b(ctrl_rd_addr_b), .ctrl_rd_en_b(ctrl_rd_en_b), 
+        .ctrl_b_accept_w(ctrl_b_accept_w), .ctrl_b_weight_index(ctrl_b_weight_index),
+        
+        .ctrl_rd_addr_c(ctrl_rd_addr_c), .ctrl_rd_en_c(ctrl_rd_en_c), 
+        .ctrl_c_valid(ctrl_c_valid), .ctrl_vpu_mode(ctrl_vpu_mode),
+        
         .ctrl_wr_addr_d(ctrl_wr_addr_d),
         .ctrl_row_mask(ctrl_row_mask), .ctrl_col_mask(ctrl_col_mask),
         // Feedback
@@ -132,9 +144,9 @@ module test_top;
         cmd.addr_c = ac;
         cmd.addr_b = ab;
         cmd.addr_a = aa;
-        cmd.len_n  = 8'(n); // N 决定列掩码 (Cols)
-        cmd.len_k  = 8'(k); // K 决定行掩码 (Rows)
-        cmd.len_m  = 8'd16; // M 不影响硬件逻辑，保留默认
+        cmd.len_n  = 8'(n); 
+        cmd.len_k  = 8'(k); 
+        cmd.len_m  = 8'd16; 
         
         wait(!rst && cmd_ready);
         @(posedge clk);
@@ -146,7 +158,6 @@ module test_top;
     endtask
 
     // 任务：预加载 Buffer 数据
-    // 简单起见，给 A/B/C Buffer 的相同地址写入相同数据
     task load_buffer_data(input int start_addr, input int count, input int val_a, input int val_b);
         $display("[%0t] [Test] Pre-loading buffers...", $time);
         @(posedge clk);
@@ -154,8 +165,7 @@ module test_top;
             host_wr_en_in <= 1;
             host_wr_addr_in <= start_addr + i;
             for(int w=0; w<W; w++) begin
-                // Pack 4 bytes for input A/B (simulated) or just fill lower bits
-                // 这里简单将输入 A 设为 val_a, B 设为 val_b
+                // [FIXED] Hex Syntax Error Fix
                 host_wr_data_in[w] <= (val_b << 16) | (val_a & 16'hFFFF); 
             end
             @(posedge clk);
@@ -180,45 +190,40 @@ module test_top;
         $display("[%0t] [Test] Reset released.", $time);
         
         // ------------------------------------------------------------
-        // Step 1: 预加载数据 (模拟 Host 写内存)
+        // Step 1: 预加载数据
         // ------------------------------------------------------------
-        // 向地址 0x100~0x10F 写入数据 (供 Task 1 使用)
-        // 设 A=1, B=1. 预期结果是累加值
+        // 写入 1, 1 -> 结果应为 1*1*16 + Bias = 16 + Bias
         load_buffer_data(10'h100, 32, 1, 1); 
         
         repeat(10) @(posedge clk);
 
         // ------------------------------------------------------------
-        // Step 2: Batch 1 - 两个小矩阵任务 (K=8, N=8)
+        // Step 2: Batch 1 (K=8, N=8)
         // ------------------------------------------------------------
         $display("\n=== Starting Batch 1 (K=8, N=8) ===");
-        // 假设同一批次参数相同
         fork
             begin
-                // Task 1: Source Addr 0x100, Dest 0x200
                 send_cmd(10'h200, 10'h100, 10'h100, 10'h100, 8, 8);
-                // Task 2: Source Addr 0x100, Dest 0x210 (紧随其后)
                 send_cmd(10'h210, 10'h100, 10'h100, 10'h100, 8, 8);
             end
         join
 
-        // 等待 Batch 1 全部完成 (两个 IRQ)
+        // 等待 IRQ
         wait(done_irq); 
         $display("[%0t] [IRQ] Batch 1 - Task 1 Done", $time);
-        @(posedge clk); wait(!done_irq); // 等待 IRQ 拉低
+        @(posedge clk); wait(!done_irq);
 
         wait(done_irq); 
         $display("[%0t] [IRQ] Batch 1 - Task 2 Done", $time);
         @(posedge clk); wait(!done_irq);
 
-        $display("[%0t] [Test] Batch 1 Completed. FIFO should be empty.", $time);
-        repeat(20) @(posedge clk); // Gap between batches
+        $display("[%0t] [Test] Batch 1 Completed.", $time);
+        repeat(20) @(posedge clk);
 
         // ------------------------------------------------------------
-        // Step 3: Batch 2 - 一个全尺寸任务 (K=16, N=16)
+        // Step 3: Batch 2 (K=16, N=16)
         // ------------------------------------------------------------
         $display("\n=== Starting Batch 2 (K=16, N=16) ===");
-        // Task 3: Source Addr 0x100, Dest 0x300
         send_cmd(10'h300, 10'h100, 10'h100, 10'h100, 16, 16);
 
         wait(done_irq);
@@ -226,38 +231,31 @@ module test_top;
         @(posedge clk);
 
         // ------------------------------------------------------------
-        // Step 4: 结果验证 (读取 Output Buffer)
+        // Step 4: 结果验证
         // ------------------------------------------------------------
         $display("\n=== Verifying Output (Reading from Dest Addr 0x200) ===");
-        // 读取 Task 1 的结果 (地址 0x200)
-        // 由于 Task 1 的 N=8, 我们期望前 8 个数据有效，后 8 个可能被 Mask 掉(保持0或旧值)
         axim_rd_en_in <= 1;
-        axim_rd_addr_in <= 10'h200; // 读第一行结果
+        axim_rd_addr_in <= 10'h200; 
         @(posedge clk);
         axim_rd_en_in <= 0;
         
-        @(posedge clk); // 等待读延迟
+        @(posedge clk);
         $display("[%0t] [AXI Read] Data at 0x200:", $time);
         for(int i=0; i<W; i++) begin
             $write("%d ", axim_rd_data_out[i]);
         end
         $write("\n");
 
-        // 简单断言：如果是 8x8 矩阵，前8个数据应该非零(因为我们填了1)，后8个应为0(被Mask)
-        // 注意：具体数值取决于 Systolic Array 的内部累加逻辑，这里只检查 Mask 效果
         if (axim_rd_data_out[0] !== 0 && axim_rd_data_out[8] === 0) 
             $display("[PASS] Masking Logic seems correct (Col 0 active, Col 8 inactive).");
         else
-            $warning("[WARN] Masking check failed or Data is zero. Check array calculation.");
+            $warning("[WARN] Masking check failed or Data is zero.");
 
         repeat(20) @(posedge clk);
         $finish;
     end
 
-    // ========================================================================
-    // 6. 监控器 (Monitor)
-    // ========================================================================
-    // 监控核心写回信号，确认握手成功
+    // Monitor
     always @(posedge clk) begin
         if (core_writeback_valid) begin
             $display("[%0t] [Core->CU] Writeback Valid! Row Index: %0d", $time, u_cu.wb_row_cnt);
