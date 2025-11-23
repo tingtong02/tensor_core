@@ -133,6 +133,7 @@ module top_tpu #(
     logic                  ctrl_b_accept_w;
     logic [$clog2(SYSTOLIC_ARRAY_WIDTH)-1:0] ctrl_b_weight_index;
     logic                  ctrl_c_valid;
+    logic                  ctrl_psum_valid; // [新增] 声明连接线
     logic [2:0]            ctrl_vpu_mode;
     logic                  core_writeback_valid;
     logic [SYSTOLIC_ARRAY_WIDTH-1:0] ctrl_row_mask, ctrl_col_mask;
@@ -225,6 +226,7 @@ module top_tpu #(
         // Control Interface
         .ctrl_rd_addr_a(ctrl_rd_addr_a), .ctrl_rd_en_a(ctrl_rd_en_a),
         .ctrl_a_valid(ctrl_a_valid),     .ctrl_a_switch(ctrl_a_switch),
+        .ctrl_psum_valid(ctrl_psum_valid), // [新增] 连接输入
         
         .ctrl_rd_addr_b(ctrl_rd_addr_b), .ctrl_rd_en_b(ctrl_rd_en_b),
         .ctrl_b_accept_w(ctrl_b_accept_w), .ctrl_b_weight_index(ctrl_b_weight_index),
@@ -256,6 +258,7 @@ module top_tpu #(
 
         .ctrl_rd_addr_a(ctrl_rd_addr_a), .ctrl_rd_en_a(ctrl_rd_en_a),
         .ctrl_a_valid(ctrl_a_valid),     .ctrl_a_switch(ctrl_a_switch),
+        .ctrl_psum_valid(ctrl_psum_valid), // [新增] 连接输出
         
         .ctrl_rd_addr_b(ctrl_rd_addr_b), .ctrl_rd_en_b(ctrl_rd_en_b),
         .ctrl_b_accept_w(ctrl_b_accept_w), .ctrl_b_weight_index(ctrl_b_weight_index),
