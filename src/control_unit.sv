@@ -303,8 +303,8 @@ module control_unit #(
                 // 2. 计数器与触发
                 if (cnt_a < W) begin
                     cnt_a <= cnt_a + 1'b1;
-                    // 在 W-1 周期触发 C (C将在下一拍看到触发，再下一拍启动，正好间隔W+1)
-                    if (cnt_a == (W - 1)) begin
+                    // 在 W-2 周期触发 C (C将在下一拍看到触发，再下一拍启动)
+                    if (cnt_a == (W - 2)) begin
                         trigger_c_start <= 1'b1;
                         cmd_info_for_c  <= curr_cmd_a;
                     end
