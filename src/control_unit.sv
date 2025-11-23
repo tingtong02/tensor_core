@@ -134,25 +134,9 @@ module control_unit #(
     logic [7:0] active_len_k; // 用于控制行掩码 (Rows)
     logic [7:0] active_len_n; // 用于控制列掩码 (Cols)
 
-    // 只要 Stage B 读入新指令，就更新当前批次的尺寸配置
-    // 由于你的假设：同一批次内 K/N 是不变的，所以重复赋值没有问题。
-    // 当新的一批任务进入时，这里会自动更新为新的 K/N。
-    always_ff @(posedge clk) begin
-        if (rst) begin
-            active_len_k <= 0;
-            active_len_n <= 0;
-        end else begin
-            // 当 Stage B 处于 Active 且计数器为 0 时，说明正在读取新指令
-            // 此时锁存该指令的维度信息
-            if (b_active && (cnt_b == 0)) begin
-                active_len_k <= curr_cmd_b.len_k;
-                active_len_n <= curr_cmd_b.len_n;
-            end
-        end
-    end
 
     // ========================================================================
-    // Stage B (Master) - 权重加载
+    // Stage B (Master) - 权重加载 (修正版)
     // ========================================================================
     // 时序目标: t=0..15 读, t=16 Gap, t=17 Stage A 启动
     command_t   curr_cmd_b;
@@ -163,6 +147,8 @@ module control_unit #(
             b_active <= 0; fifo_rd_en <= 0;
             ctrl_rd_en_b <= 0; ctrl_rd_addr_b <= 0;
             trigger_a_start <= 0;
+            active_len_k <= 0; // Reset
+            active_len_n <= 0; // Reset
         end else begin
             // 默认复位单周期脉冲信号
             fifo_rd_en <= 0;
@@ -173,45 +159,52 @@ module control_unit #(
                 if (!fifo_empty) begin
                     fifo_rd_en <= 1; // Pop FIFO
                     b_active   <= 1;
-                    cnt_b      <= 0; // 下一拍直接开始 Cycle 0
+                    cnt_b      <= 0; 
+                    
+                    // [关键修正] 在启动的瞬间，立即锁存当前 FIFO 头部的参数
+                    // 这样在下一拍 (Cycle 0) 时，active_len 已经是正确的值了
+                    active_len_k <= fifo_dout.len_k;
+                    active_len_n <= fifo_dout.len_n;
                 end else begin
                     ctrl_rd_en_b <= 0;
                 end
             end else begin
                 // --- ACTIVE 状态 ---
                 
-                // 1. 读使能逻辑 (0..15)
+                // 1. 读使能逻辑 (保持不变)
                 if (cnt_b == 0) begin
-                    // 刚开始或 Loop 回来
                     curr_cmd_b <= fifo_dout; 
                     ctrl_rd_en_b   <= 1'b1;
                     ctrl_rd_addr_b <= fifo_dout.addr_b; 
                 end 
-                else if (cnt_b < W) begin // 1..15
+                else if (cnt_b < W) begin 
                     ctrl_rd_en_b   <= 1'b1;
                     ctrl_rd_addr_b <= curr_cmd_b.addr_b + ADDR_WIDTH'(cnt_b);
                 end 
-                else begin // cnt_b == 16 (Gap)
+                else begin 
                     ctrl_rd_en_b <= 1'b0;
                 end
 
-                // 2. 计数器流转与触发逻辑
+                // 2. 计数器流转
                 if (cnt_b < W) begin
                     cnt_b <= cnt_b + 1'b1;
                 end 
                 else begin 
                     // cnt_b == 16 (Gap 周期)
-                    // [修正点] 在这里触发 A。
-                    // B(t=16) 触发 -> A(t=17) 启动。间隔 17 周期。
                     trigger_a_start <= 1'b1;
                     cmd_info_for_a  <= curr_cmd_b;
                     
                     if (!fifo_empty) begin
-                        // 有新指令 -> Loop，无缝开始下一个任务
+                        // 有新指令 -> Loop
                         fifo_rd_en <= 1;
                         cnt_b      <= 0; 
+
+                        // [关键修正] 在连发模式下，也要在这里立即抓取下一个任务的参数
+                        // 确保下一个任务的 Cycle 0 Mask 正确
+                        active_len_k <= fifo_dout.len_k;
+                        active_len_n <= fifo_dout.len_n;
                     end else begin
-                        // 无指令 -> 回 IDLE
+                        // 无指令 -> IDLE
                         b_active <= 0;
                         cnt_b    <= 0; 
                     end
