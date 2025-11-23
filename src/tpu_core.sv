@@ -347,6 +347,8 @@ module tpu_core #(
     endgenerate
     
     assign aligned_wr_valid = &masked_valid_pipe; // AND-Reduction: 所有列就绪
-    assign core_writeback_valid = aligned_wr_valid;
+    
+    // [FIX] 增加门控：必须通过 Mask 检查（所有启用的列都Valid） 且 掩码本身不全为0
+    assign core_writeback_valid = aligned_wr_valid && (|ctrl_col_mask);
 
 endmodule
