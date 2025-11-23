@@ -129,6 +129,29 @@ module control_unit #(
     assign busy = !fifo_empty || b_active || a_active || c_active || d_task_active || (dq_cnt != 0);
 
     // ========================================================================
+    // [新增] 批次参数锁存逻辑 (Batch Configuration)
+    // ========================================================================
+    logic [7:0] active_len_k; // 用于控制行掩码 (Rows)
+    logic [7:0] active_len_n; // 用于控制列掩码 (Cols)
+
+    // 只要 Stage B 读入新指令，就更新当前批次的尺寸配置
+    // 由于你的假设：同一批次内 K/N 是不变的，所以重复赋值没有问题。
+    // 当新的一批任务进入时，这里会自动更新为新的 K/N。
+    always_ff @(posedge clk) begin
+        if (rst) begin
+            active_len_k <= 0;
+            active_len_n <= 0;
+        end else begin
+            // 当 Stage B 处于 Active 且计数器为 0 时，说明正在读取新指令
+            // 此时锁存该指令的维度信息
+            if (b_active && (cnt_b == 0)) begin
+                active_len_k <= curr_cmd_b.len_k;
+                active_len_n <= curr_cmd_b.len_n;
+            end
+        end
+    end
+
+    // ========================================================================
     // Stage B (Master) - 权重加载
     // ========================================================================
     // 时序目标: t=0..15 读, t=16 Gap, t=17 Stage A 启动
@@ -427,22 +450,29 @@ module control_unit #(
         end
     end
 
-    // Mask 生成
+    // ========================================================================
+    // [修改] Mask 生成逻辑
+    // ========================================================================
     always_comb begin
         ctrl_row_mask = '0;
         ctrl_col_mask = '0;
         
-        // 输入行掩码 (由 A 阶段指令决定)
-        for (int i = 0; i < W; i++) begin
-            if (i < curr_cmd_a.len_k) ctrl_row_mask[i] = 1'b1;
-        end
-        if (!a_active) ctrl_row_mask = '0;
+        // 只要系统处于忙碌状态 (Busy)，就根据当前锁存的批次参数打开 PE 阵列
+        // 这保证了:
+        // 1. Stage B (权重加载) 期间，Mask 为 1 -> PE Enable -> 权重正确锁存
+        // 2. Stage A (计算) 期间，Mask 为 1 -> PE Enable -> 计算进行
+        // 3. Stage D (写回) 期间，Mask 为 1 -> 输出有效
+        if (busy) begin
+            // 行掩码 (由 K 决定)
+            for (int i = 0; i < W; i++) begin
+                if (i < active_len_k) ctrl_row_mask[i] = 1'b1;
+            end
 
-        // 输出列掩码 (由当前正在写回的 D 任务决定)
-        for (int i = 0; i < W; i++) begin
-            if (i < curr_d_info.len_n) ctrl_col_mask[i] = 1'b1;
+            // 列掩码 (由 N 决定)
+            for (int i = 0; i < W; i++) begin
+                if (i < active_len_n) ctrl_col_mask[i] = 1'b1;
+            end
         end
-         if (!d_task_active) ctrl_col_mask = '0;
     end
 
 endmodule
