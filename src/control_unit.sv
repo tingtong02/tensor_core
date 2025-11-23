@@ -143,21 +143,23 @@ module control_unit #(
     // ========================================================================
     logic d_task_done; // 声明在前面使用
 
+    // [修正] 将中间信号移到 always 块外部，使用 assign 进行连续赋值
+    logic task_started;
+    logic task_finished;
+
+    // 定义触发条件 (组合逻辑)
+    assign task_started  = b_active && (cnt_b == 0); // Stage B 刚启动任务
+    assign task_finished = d_task_done;              // Stage D 完成任务
+
     always_ff @(posedge clk) begin
         if (rst) begin
             tasks_in_flight <= 0;
         end else begin
-            // 任务开始: Stage B 启动新任务 (Cycle 0)
-            logic task_started;
-            assign task_started = b_active && (cnt_b == 0);
-
-            // 任务结束: Stage D 完成任务
-            logic task_finished;
-            assign task_finished = d_task_done;
-
+            // 在时序逻辑中直接使用外部定义的信号
             case ({task_started, task_finished})
-                2'b10: tasks_in_flight <= tasks_in_flight + 1'b1;
-                2'b01: tasks_in_flight <= tasks_in_flight - 1'b1;
+                2'b10: tasks_in_flight <= tasks_in_flight + 1'b1; // 只有开始
+                2'b01: tasks_in_flight <= tasks_in_flight - 1'b1; // 只有结束
+                // 2'b11: 同时开始和结束，计数器不变 (含在 default 中)
                 default: tasks_in_flight <= tasks_in_flight;
             endcase
         end
