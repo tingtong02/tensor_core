@@ -108,10 +108,9 @@ module pe #(
                     pe_psum_out <= pe_psum_in; // 直通
                 end
 
-                // (关键修复: Psum Valid 逻辑)
-                // pe_psum_valid_out 必须与 pe_psum_out 具有相同的1周期延迟
-                // 它们都由 pe_valid_in 触发
-                pe_psum_valid_out <= pe_valid_in; // <-- 必须使用 pe_valid_in
+                // [FIX] Psum Valid 必须是从上方传递下来的信号 (打一拍)
+                // 这样 Valid 标志会跟随 Psum 数据一起向下流动
+                pe_psum_valid_out <= pe_psum_valid_in;
                 
                 if (pe_accept_w_in && !pe_match) begin
                     // 状态 1: 传播 (Propagate)
