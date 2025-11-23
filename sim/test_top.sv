@@ -220,7 +220,7 @@ module test_top;
         // --- 2. 发送指令 ---
         $display("\n=== Starting Task (K=8, N=8) ===");
         // 指令：Read A from 0x100, B from 0x200, C from 0x300, Write D to 0x400
-        send_cmd(10'h400, 10'h300, 10'h200, 10'h100, 8, 8);
+        send_cmd(10'h000, 10'h300, 10'h200, 10'h100, 8, 8);
 
         // --- 3. 等待完成 ---
         wait(done_irq); 
