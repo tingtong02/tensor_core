@@ -52,6 +52,12 @@ module control_unit #(
     // 长度参数位宽：同上
     localparam LEN_WIDTH = $clog2(W + 1);
 
+    // [新增] D 阶段提前触发偏移量
+    // 5 = 3 (D阶段握手延迟) + 2 (安全余量/对齐调整)
+    // 这是一个固定开销，通常不随 W 变化
+    localparam int D_PRE_TRIGGER_OFFSET = 5;
+
+
     // ========================================================================
     // 结构定义
     // ========================================================================
@@ -366,10 +372,19 @@ module control_unit #(
                 // 2. 计数器
                 if (cnt_c < W) begin
                     cnt_c <= cnt_c + 1'b1;
+
+                    // [FIX] 提前触发 D 阶段！
+                    // 原来是在 else (Gap) 里触发，太晚了
+                    if (cnt_c == (W - D_PRE_TRIGGER_OFFSET)) begin 
+                        trigger_d_queue <= 1'b1;
+                        cmd_info_for_d  <= curr_cmd_c;
+                    end
+
                 end else begin
                     // cnt_c == W (Gap)
-                    trigger_d_queue <= 1'b1;
-                    cmd_info_for_d  <= curr_cmd_c;
+                    // [删除] 这里的触发逻辑移到上面去了
+                    // trigger_d_queue <= 1'b1;
+                    // cmd_info_for_d  <= curr_cmd_c;
 
                     if (trigger_c_start) begin
                         cnt_c <= 0;
