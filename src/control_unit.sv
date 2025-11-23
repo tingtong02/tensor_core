@@ -1,5 +1,5 @@
 `timescale 1ns/1ps
-`default_nettype none
+//`default_nettype none
 
 module control_unit #(
     parameter int ADDR_WIDTH           = 10,
@@ -208,11 +208,11 @@ module control_unit #(
                 if (cnt_b == 0) begin
                     curr_cmd_b <= fifo_dout; 
                     ctrl_rd_en_b   <= 1'b1;
-                    ctrl_rd_addr_b <= fifo_dout.addr_b; 
+                    ctrl_rd_addr_b <= fifo_dout.addr_b + ADDR_WIDTH'(W - 1);
                 end 
                 else if (cnt_b < W) begin 
                     ctrl_rd_en_b   <= 1'b1;
-                    ctrl_rd_addr_b <= curr_cmd_b.addr_b + ADDR_WIDTH'(cnt_b);
+                    ctrl_rd_addr_b <= ctrl_rd_addr_b - 1'b1;
                 end 
                 else begin 
                     ctrl_rd_en_b <= 1'b0;
