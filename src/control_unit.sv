@@ -8,7 +8,7 @@ module control_unit #(
     input logic clk,
     input logic rst,
 
-    // --- 1. 主机命令接口 (Host Command Interface) ---
+    // --- 1. 主机命令接口 ---
     input logic        cmd_valid,
     input logic [63:0] cmd_data,
     output logic       cmd_ready, 
@@ -16,14 +16,14 @@ module control_unit #(
     output logic       busy,      
     output logic       done_irq,  
 
-    // --- 2. TPU 核心控制接口 (TPU Core Control Interfaces) ---
+    // --- 2. TPU 核心控制接口 ---
     
     // Stage A (Input Activations)
     output logic [ADDR_WIDTH-1:0] ctrl_rd_addr_a,
     output logic                  ctrl_rd_en_a,
     output logic                  ctrl_a_valid,  
     output logic                  ctrl_a_switch,
-    output logic                  ctrl_psum_valid, // [NEW] 新增 Psum Valid 信号
+    output logic                  ctrl_psum_valid, // Psum Valid (Top Injection)
     
     // Stage B (Weights)
     output logic [ADDR_WIDTH-1:0] ctrl_rd_addr_b,
@@ -31,7 +31,7 @@ module control_unit #(
     output logic                  ctrl_b_accept_w, 
     output logic [$clog2(SYSTOLIC_ARRAY_WIDTH)-1:0] ctrl_b_weight_index, 
 
-    // Stage C (Bias / Accumulators)
+    // Stage C (Bias)
     output logic [ADDR_WIDTH-1:0] ctrl_rd_addr_c,
     output logic                  ctrl_rd_en_c,
     output logic                  ctrl_c_valid,    
@@ -46,7 +46,11 @@ module control_unit #(
     output logic [SYSTOLIC_ARRAY_WIDTH-1:0] ctrl_col_mask
 );
 
-    localparam W = SYSTOLIC_ARRAY_WIDTH; // 16
+    localparam W = SYSTOLIC_ARRAY_WIDTH; 
+    // 计数器位宽：需要计数到 W (例如 16)，所以需要 log2(16+1) = 5 bits
+    localparam CNT_WIDTH = $clog2(W + 1);
+    // 长度参数位宽：同上
+    localparam LEN_WIDTH = $clog2(W + 1);
 
     // ========================================================================
     // 结构定义
@@ -56,7 +60,7 @@ module control_unit #(
         logic [ADDR_WIDTH-1:0] addr_c;
         logic [ADDR_WIDTH-1:0] addr_b;
         logic [ADDR_WIDTH-1:0] addr_a;
-        logic [7:0]            len_n;
+        logic [7:0]            len_n; // Host指令格式固定为8位
         logic [7:0]            len_k;
         logic [7:0]            len_m;
     } command_t;
@@ -79,9 +83,7 @@ module control_unit #(
 
     always_ff @(posedge clk) begin
         if (rst) begin
-            wr_ptr <= 0;
-            rd_ptr <= 0; 
-            fifo_count <= 0;
+            wr_ptr <= 0; rd_ptr <= 0; fifo_count <= 0;
         end else begin
             if (cmd_valid && !fifo_full) begin
                 mem_fifo[wr_ptr] <= cmd_data;
@@ -110,35 +112,60 @@ module control_unit #(
     logic       trigger_d_queue; 
     command_t   cmd_info_for_d;
 
-    // 给状态机变量赋初始值 = 0，防止仿真初期出现不定态 (X)
-    logic [4:0] cnt_b = 0;
-    logic       b_active = 0;
+    // 状态机计数器 (使用参数化位宽)
+    logic [CNT_WIDTH-1:0] cnt_b = 0;
+    logic                 b_active = 0;
     
-    logic [4:0] cnt_a = 0;
-    logic       a_active = 0;
+    logic [CNT_WIDTH-1:0] cnt_a = 0;
+    logic                 a_active = 0;
     
-    logic [4:0] cnt_c = 0;
-    logic       c_active = 0;
+    logic [CNT_WIDTH-1:0] cnt_c = 0;
+    logic                 c_active = 0;
     
     // D Stage 信号
     logic [1:0] dq_wr = 0, dq_rd = 0;
     logic [2:0] dq_cnt = 0;
     logic       d_task_active = 0;
+    
+    // [新增] 在途任务计数器
+    logic [3:0] tasks_in_flight = 0;
 
-    // Busy: 只要有任何子模块在忙，或者任务队列里有东西，模块就忙
     assign busy = !fifo_empty || b_active || a_active || c_active || d_task_active || (dq_cnt != 0);
 
     // ========================================================================
-    // [新增] 批次参数锁存逻辑 (Batch Configuration)
+    // 批次参数锁存 (Batch Configuration)
     // ========================================================================
-    logic [7:0] active_len_k; // 用于控制行掩码 (Rows)
-    logic [7:0] active_len_n; // 用于控制列掩码 (Cols)
+    logic [LEN_WIDTH-1:0] active_len_k; // 控制行掩码
+    logic [LEN_WIDTH-1:0] active_len_n; // 控制列掩码
 
+    // ========================================================================
+    // 在途任务计数逻辑 (解决 Gap 期间 Mask 丢失问题)
+    // ========================================================================
+    logic d_task_done; // 声明在前面使用
+
+    always_ff @(posedge clk) begin
+        if (rst) begin
+            tasks_in_flight <= 0;
+        end else begin
+            // 任务开始: Stage B 启动新任务 (Cycle 0)
+            logic task_started;
+            assign task_started = b_active && (cnt_b == 0);
+
+            // 任务结束: Stage D 完成任务
+            logic task_finished;
+            assign task_finished = d_task_done;
+
+            case ({task_started, task_finished})
+                2'b10: tasks_in_flight <= tasks_in_flight + 1'b1;
+                2'b01: tasks_in_flight <= tasks_in_flight - 1'b1;
+                default: tasks_in_flight <= tasks_in_flight;
+            endcase
+        end
+    end
 
     // ========================================================================
-    // Stage B (Master) - 权重加载 (修正版)
+    // Stage B (Master) - 权重加载
     // ========================================================================
-    // 时序目标: t=0..15 读, t=16 Gap, t=17 Stage A 启动
     command_t   curr_cmd_b;
 
     always_ff @(posedge clk) begin
@@ -147,10 +174,9 @@ module control_unit #(
             b_active <= 0; fifo_rd_en <= 0;
             ctrl_rd_en_b <= 0; ctrl_rd_addr_b <= 0;
             trigger_a_start <= 0;
-            active_len_k <= 0; // Reset
-            active_len_n <= 0; // Reset
+            active_len_k <= 0;
+            active_len_n <= 0;
         end else begin
-            // 默认复位单周期脉冲信号
             fifo_rd_en <= 0;
             trigger_a_start <= 0;
 
@@ -161,17 +187,16 @@ module control_unit #(
                     b_active   <= 1;
                     cnt_b      <= 0; 
                     
-                    // [关键修正] 在启动的瞬间，立即锁存当前 FIFO 头部的参数
-                    // 这样在下一拍 (Cycle 0) 时，active_len 已经是正确的值了
-                    active_len_k <= fifo_dout.len_k;
-                    active_len_n <= fifo_dout.len_n;
+                    // [修正] 立即锁存参数，确保 Cycle 0 的 Mask 正确
+                    active_len_k <= fifo_dout.len_k[LEN_WIDTH-1:0];
+                    active_len_n <= fifo_dout.len_n[LEN_WIDTH-1:0];
                 end else begin
                     ctrl_rd_en_b <= 0;
                 end
             end else begin
                 // --- ACTIVE 状态 ---
                 
-                // 1. 读使能逻辑 (保持不变)
+                // 1. 读使能逻辑
                 if (cnt_b == 0) begin
                     curr_cmd_b <= fifo_dout; 
                     ctrl_rd_en_b   <= 1'b1;
@@ -190,21 +215,20 @@ module control_unit #(
                     cnt_b <= cnt_b + 1'b1;
                 end 
                 else begin 
-                    // cnt_b == 16 (Gap 周期)
+                    // cnt_b == W (Gap 周期)
                     trigger_a_start <= 1'b1;
                     cmd_info_for_a  <= curr_cmd_b;
                     
                     if (!fifo_empty) begin
-                        // 有新指令 -> Loop
+                        // Loop
                         fifo_rd_en <= 1;
                         cnt_b      <= 0; 
-
-                        // [关键修正] 在连发模式下，也要在这里立即抓取下一个任务的参数
-                        // 确保下一个任务的 Cycle 0 Mask 正确
-                        active_len_k <= fifo_dout.len_k;
-                        active_len_n <= fifo_dout.len_n;
+                        
+                        // [修正] 连发模式下也要立即更新参数
+                        active_len_k <= fifo_dout.len_k[LEN_WIDTH-1:0];
+                        active_len_n <= fifo_dout.len_n[LEN_WIDTH-1:0];
                     end else begin
-                        // 无指令 -> IDLE
+                        // IDLE
                         b_active <= 0;
                         cnt_b    <= 0; 
                     end
@@ -213,14 +237,13 @@ module control_unit #(
         end
     end
 
-    // B-Core 控制信号生成
+    // B-Core 控制信号
     always_ff @(posedge clk) begin
         if (rst) begin
             ctrl_b_accept_w <= 0;
             ctrl_b_weight_index <= 0;
         end else begin
             ctrl_b_accept_w <= ctrl_rd_en_b;
-            // 仅在读使能有效时更新 Index，防止 X 态
             if (ctrl_rd_en_b) begin
                 if (cnt_b == 0) 
                      ctrl_b_weight_index <= ($clog2(W))'(W - 1);
@@ -231,101 +254,82 @@ module control_unit #(
     end
 
     // ========================================================================
-    // Stage A (Input) & Switch - Follower 1
+    // Stage A (Input) - Follower 1 (修正时序: 0~W-1 读, 0 周期 Switch)
     // ========================================================================
-    // 时序目标: 收到 Trigger 后启动，运行 17 周期
-    // 并在倒数第二拍触发 Stage C (无缝衔接)
     command_t   curr_cmd_a;
 
     always_ff @(posedge clk) begin
-            if (rst) begin
-                cnt_a <= 0;
-                a_active <= 0; 
-                ctrl_rd_en_a <= 0; ctrl_rd_addr_a <= 0;
-                ctrl_a_switch <= 0;
-                trigger_c_start <= 0;
+        if (rst) begin
+            cnt_a <= 0;
+            a_active <= 0; 
+            ctrl_rd_en_a <= 0; ctrl_rd_addr_a <= 0;
+            ctrl_a_switch <= 0;
+            trigger_c_start <= 0;
+        end else begin
+            ctrl_a_switch <= 0;
+            trigger_c_start <= 0;
+
+            if (!a_active) begin
+                if (trigger_a_start) begin
+                    a_active <= 1;
+                    cnt_a <= 0;
+                    curr_cmd_a <= cmd_info_for_a;
+                    
+                    // Cycle 0: 读 + Switch
+                    ctrl_a_switch  <= 1'b1;
+                    ctrl_rd_en_a   <= 1'b1;
+                    ctrl_rd_addr_a <= cmd_info_for_a.addr_a;
+                end else begin
+                    ctrl_rd_en_a <= 0;
+                end
             end else begin
-                // 脉冲信号默认复位
-                ctrl_a_switch <= 0;
-                trigger_c_start <= 0;
-    
-                if (!a_active) begin
-                    // --- IDLE -> START ---
-                    if (trigger_a_start) begin
-                        a_active <= 1;
-                        cnt_a <= 0;
-                        curr_cmd_a <= cmd_info_for_a;
-                        
-                        // Cycle 0 行为:
-                        ctrl_a_switch  <= 1'b1;  // 发送 Switch
-                        ctrl_rd_en_a   <= 1'b1;  // 开始读
-                        ctrl_rd_addr_a <= cmd_info_for_a.addr_a;
-                    end else begin
-                        ctrl_rd_en_a <= 0;
+                // 1. 读使能逻辑
+                // Cycle 0..(W-2) -> RdEn=1; Cycle (W-1) -> RdEn=0 (为Gap做准备)
+                if (cnt_a < (W - 1)) begin 
+                    ctrl_rd_en_a   <= 1'b1;
+                    ctrl_rd_addr_a <= ctrl_rd_addr_a + 1'b1;
+                end else if (cnt_a == (W - 1)) begin
+                    ctrl_rd_en_a <= 1'b0;
+                end
+
+                // 2. 计数器与触发
+                if (cnt_a < W) begin
+                    cnt_a <= cnt_a + 1'b1;
+                    // 在 W-1 周期触发 C (C将在下一拍看到触发，再下一拍启动，正好间隔W+1)
+                    if (cnt_a == (W - 1)) begin
+                        trigger_c_start <= 1'b1;
+                        cmd_info_for_c  <= curr_cmd_a;
                     end
                 end else begin
-                    // --- ACTIVE (Cycle 0..16) ---
-                    
-                    // 1. 读使能与地址逻辑
-                    if (cnt_a < (W - 1)) begin 
-                        // Cycle 0..14 -> Next is 1..15
-                        // 保持读使能，地址递增
+                    // cnt_a == W (Gap)
+                    if (trigger_a_start) begin
+                        cnt_a <= 0;
+                        curr_cmd_a <= cmd_info_for_a;
+                        ctrl_a_switch  <= 1'b1;
                         ctrl_rd_en_a   <= 1'b1;
-                        ctrl_rd_addr_a <= ctrl_rd_addr_a + 1'b1;
-                    end else if (cnt_a == (W - 1)) begin
-                        // Cycle 15 -> Next is 16 (Gap)
-                        // 在这里拉低读使能，确保 Cycle 16 不读 -> Cycle 0 的 Valid 为 0
-                        ctrl_rd_en_a <= 1'b0;
-                    end
-    
-                    // 2. 计数器与触发逻辑
-                    if (cnt_a < W) begin
-                        cnt_a <= cnt_a + 1'b1;
-    
-                        // 触发 C: 在 Cycle 15 (W-1) 触发
-                        // C 将在 A 的 Cycle 16 看到触发，Cycle 17 (即 A 的 Cycle 0) 启动
-                        // 间隔 17 周期
-                        if (cnt_a == (W - 1)) begin
-                            trigger_c_start <= 1'b1;
-                            cmd_info_for_c  <= curr_cmd_a;
-                        end
+                        ctrl_rd_addr_a <= cmd_info_for_a.addr_a;
                     end else begin
-                        // cnt_a == 16 (Gap 周期)
-                        // 此时 rd_en 已经是 0 (由 Cycle 15 设定)
-                        
-                        if (trigger_a_start) begin
-                            // [Loop] 无缝开始下一个任务
-                            cnt_a <= 0;
-                            curr_cmd_a <= cmd_info_for_a;
-                            
-                            // 下一拍是 Cycle 0，重新拉高信号
-                            ctrl_a_switch  <= 1'b1; 
-                            ctrl_rd_en_a   <= 1'b1;
-                            ctrl_rd_addr_a <= cmd_info_for_a.addr_a;
-                        end else begin
-                            // [Done] 回到 IDLE
-                            a_active <= 0;
-                            cnt_a    <= 0;
-                            // rd_en 保持 0
-                        end
+                        a_active <= 0;
+                        cnt_a    <= 0;
                     end
                 end
             end
         end
+    end
 
     // A Valid 生成
     always_ff @(posedge clk) begin
         if (rst) begin
-        ctrl_a_valid <= 0;
-        ctrl_psum_valid <= 0; // [NEW]
+            ctrl_a_valid <= 0;
+            ctrl_psum_valid <= 0;
         end else begin
-        ctrl_a_valid <= ctrl_rd_en_a;
-        ctrl_psum_valid <= ctrl_rd_en_a; // [NEW] 逻辑与 A Valid 完全同步
+            ctrl_a_valid <= ctrl_rd_en_a;
+            ctrl_psum_valid <= ctrl_rd_en_a;
         end
     end
 
     // ========================================================================
-    // Stage C (Bias) - Follower 2 (已修正时序: 0~15读, 1~16 Valid)
+    // Stage C (Bias) - Follower 2 (修正时序: 同 A)
     // ========================================================================
     command_t   curr_cmd_c;
 
@@ -336,62 +340,43 @@ module control_unit #(
             ctrl_rd_en_c <= 0; ctrl_rd_addr_c <= 0;
             trigger_d_queue <= 0;
         end else begin
-            // 默认复位单周期脉冲
             trigger_d_queue <= 0;
 
             if (!c_active) begin
-                // --- IDLE -> START ---
                 if (trigger_c_start) begin
                     c_active <= 1;
                     cnt_c <= 0;
                     curr_cmd_c <= cmd_info_for_c;
-                    
-                    // Cycle 0: 开始读
                     ctrl_rd_en_c   <= 1'b1;
                     ctrl_rd_addr_c <= cmd_info_for_c.addr_c;
                 end else begin
                     ctrl_rd_en_c <= 0;
                 end
             end else begin
-                // --- ACTIVE (Cycle 0..16) ---
-                
-                // 1. 读使能逻辑 (关键修改点)
-                // 目标: Cycle 0..14 -> RdEn=1; Cycle 15 -> RdEn=0
+                // 1. 读使能逻辑 (同 A, 提前一拍拉低)
                 if (cnt_c < (W - 1)) begin
-                    // Cycle 0..14
                     ctrl_rd_en_c   <= 1'b1;
                     ctrl_rd_addr_c <= ctrl_rd_addr_c + 1'b1;
                 end else if (cnt_c == (W - 1)) begin
-                    // Cycle 15: 提前拉低，确保 Cycle 16 (Gap) 不读
                     ctrl_rd_en_c <= 1'b0;
                 end
 
-                // 2. 计数器与状态流转
+                // 2. 计数器
                 if (cnt_c < W) begin
                     cnt_c <= cnt_c + 1'b1;
                 end else begin
-                    // cnt_c == 16 (Gap 周期)
-                    
-                    // 此时 Valid 信号(delayed rd_en) 为 1 (对应 Cycle 15 的读)
-                    // 下一拍 Cycle 0 的 Valid 将为 0 (对应 Cycle 16 的不读) -> 形成气泡
-                    
-                    // 触发 D 阶段入队
+                    // cnt_c == W (Gap)
                     trigger_d_queue <= 1'b1;
                     cmd_info_for_d  <= curr_cmd_c;
 
                     if (trigger_c_start) begin
-                        // [Loop] 无缝开始下一个任务
                         cnt_c <= 0;
                         curr_cmd_c <= cmd_info_for_c;
-                        
-                        // Cycle 0: 重新拉高读使能
                         ctrl_rd_en_c   <= 1'b1;
                         ctrl_rd_addr_c <= cmd_info_for_c.addr_c;
                     end else begin
-                        // [Done] 回到 IDLE
                         c_active <= 0;
                         cnt_c    <= 0;
-                        // rd_en 保持 0
                     end
                 end
             end
@@ -418,17 +403,15 @@ module control_unit #(
     } d_info_t;
 
     d_info_t d_queue [4];
-    logic       d_task_done = 0;
-    d_info_t    curr_d_info;
-    logic [7:0] wb_row_cnt = 0;
+    d_info_t curr_d_info;
+    logic [CNT_WIDTH-1:0] wb_row_cnt = 0; // 参数化计数器位宽
 
     assign done_irq = d_task_done;
 
     // 队列管理
     always_ff @(posedge clk) begin
         if (rst) begin
-            dq_wr <= 0;
-            dq_cnt <= 0;
+            dq_wr <= 0; dq_cnt <= 0;
         end else begin
             if (trigger_d_queue) begin
                 d_queue[dq_wr].addr_d <= cmd_info_for_d.addr_d;
@@ -451,7 +434,7 @@ module control_unit #(
             ctrl_wr_addr_d <= 0;
         end else begin
             d_task_done <= 0;
-
+            
             if (!d_task_active) begin
                 if (dq_cnt > 0) begin
                     curr_d_info <= d_queue[dq_rd];
@@ -461,12 +444,10 @@ module control_unit #(
                     ctrl_wr_addr_d <= d_queue[dq_rd].addr_d;
                 end
             end else begin
-                // 等待计算核心发出 Writeback Valid 信号
                 if (core_writeback_valid) begin
                     wb_row_cnt <= wb_row_cnt + 1'b1;
                     ctrl_wr_addr_d <= ctrl_wr_addr_d + 1'b1; 
                     
-                    // 始终接收 W (16) 行数据
                     if (wb_row_cnt == (W - 1)) begin
                         d_task_done <= 1;
                         d_task_active <= 0; 
@@ -477,24 +458,23 @@ module control_unit #(
     end
 
     // ========================================================================
-    // [修改] Mask 生成逻辑
+    // Mask 生成逻辑 (修正版: 使用 tasks_in_flight 覆盖 Gap)
     // ========================================================================
     always_comb begin
         ctrl_row_mask = '0;
         ctrl_col_mask = '0;
         
-        // 只要系统处于忙碌状态 (Busy)，就根据当前锁存的批次参数打开 PE 阵列
-        // 这保证了:
-        // 1. Stage B (权重加载) 期间，Mask 为 1 -> PE Enable -> 权重正确锁存
-        // 2. Stage A (计算) 期间，Mask 为 1 -> PE Enable -> 计算进行
-        // 3. Stage D (写回) 期间，Mask 为 1 -> 输出有效
-        if (busy) begin
-            // 行掩码 (由 K 决定)
+        // 双重条件:
+        // 1. busy: 覆盖 IDLE->Start 的瞬间
+        // 2. tasks_in_flight: 覆盖 Stage 切换间的 Gap
+        if (busy || (tasks_in_flight > 0)) begin
+            
+            // 行掩码
             for (int i = 0; i < W; i++) begin
                 if (i < active_len_k) ctrl_row_mask[i] = 1'b1;
             end
 
-            // 列掩码 (由 N 决定)
+            // 列掩码
             for (int i = 0; i < W; i++) begin
                 if (i < active_len_n) ctrl_col_mask[i] = 1'b1;
             end
