@@ -40,6 +40,7 @@ module systolic #(
     input logic signed [DATA_WIDTH_IN-1:0]             sys_weight_in [SYSTOLIC_ARRAY_WIDTH],
     input logic [$clog2(SYSTOLIC_ARRAY_WIDTH)-1:0] sys_index_in [SYSTOLIC_ARRAY_WIDTH],
     input logic                                     sys_accept_w_in [SYSTOLIC_ARRAY_WIDTH],
+    input logic                                     sys_psum_valid_in [SYSTOLIC_ARRAY_WIDTH], // <-- 新增: Psum Valid 输入
 
     // --- 输出 (去往底部, 矩阵 E) ---
     // 每个 'j' 对应阵列的第 'j' 列的最终Psum
@@ -95,7 +96,9 @@ module systolic #(
             assign accept_w_grid[0][j]  = sys_accept_w_in[j];
             // Psum (累加和) 总是从 0 开始
             assign psum_in_grid[0][j]   = 32'b0;
-            assign psum_valid_grid[0][j] = 1'b0; // <-- 新增: Psum valid 也从 0 (false) 开始
+            // [FIX] 原代码: assign psum_valid_grid[0][j] = 1'b0;
+            // 修改为: 连接输入端口
+            assign psum_valid_grid[0][j] = sys_psum_valid_in[j];
         end
 
         // --- 2. 实例化 16x16 PE 网格 ---

@@ -39,7 +39,8 @@ module tpu_core #(
     input logic [ADDR_WIDTH-1:0] ctrl_rd_addr_a, 
     input logic                  ctrl_rd_en_a,
     input logic                  ctrl_a_valid,    
-    input logic                  ctrl_a_switch,   
+    input logic                  ctrl_a_switch,
+    input logic                  ctrl_psum_valid, // [NEW] 接收 Psum Valid   
     
     // --- B-Flow (Weight) 控制 ---
     input logic [ADDR_WIDTH-1:0] ctrl_rd_addr_b, 
@@ -85,6 +86,8 @@ module tpu_core #(
     logic signed [DATA_WIDTH_IN-1:0] sys_in_b_skewed [W];
     logic        [$clog2(W)-1:0]     sys_idx_b_skewed  [W];
     logic                            sys_acc_b_skewed  [W];
+    logic                            sys_psum_val_skewed [W]; // [NEW] 定义内部连线
+
 
     // --- 内部连线: C-Flow Skewed (Modified) ---
     logic signed [DATA_WIDTH_ACCUM-1:0] sys_in_c_skewed [W];
@@ -192,29 +195,37 @@ module tpu_core #(
                 assign sys_in_b_skewed[0] = sys_in_b_raw[0];
                 assign sys_idx_b_skewed[0] = ctrl_b_weight_index;
                 assign sys_acc_b_skewed[0] = ctrl_b_accept_w;
+                assign sys_psum_val_skewed[0] = ctrl_psum_valid; // [NEW]
             end else begin
                 logic signed [DATA_WIDTH_IN-1:0] delay_data [j];
                 logic [$clog2(W)-1:0]            delay_idx  [j];
                 logic                            delay_acc  [j];
+                logic                            delay_pval [j]; // [NEW]
                 always_ff @(posedge clk) begin
                     if (rst) begin
                         for(int d=0; d<j; d++) begin
-                            delay_data[d] <= '0; delay_idx[d] <= '0; delay_acc[d] <= '0;
+                            delay_data[d] <= '0; 
+                            delay_idx[d] <= '0; 
+                            delay_acc[d] <= '0; 
+                            delay_pval[d] <= '0; // [NEW]
                         end
                     end else begin
                         delay_data[0] <= sys_in_b_raw[j];
                         delay_idx[0]  <= ctrl_b_weight_index;
                         delay_acc[0]  <= ctrl_b_accept_w;
+                        delay_pval[0] <= ctrl_psum_valid; // [NEW] 输入源
                         for(int d=1; d<j; d++) begin
                             delay_data[d] <= delay_data[d-1];
                             delay_idx[d]  <= delay_idx[d-1];
                             delay_acc[d]  <= delay_acc[d-1];
+                            delay_pval[d] <= delay_pval[d-1]; // [NEW] 移位
                         end
                     end
                 end
                 assign sys_in_b_skewed[j] = delay_data[j-1];
                 assign sys_idx_b_skewed[j] = delay_idx[j-1];
                 assign sys_acc_b_skewed[j] = delay_acc[j-1];
+                assign sys_psum_val_skewed[j] = delay_pval[j-1]; // [NEW] 输出
             end
         end
         
@@ -267,6 +278,8 @@ module tpu_core #(
         .sys_weight_in(sys_in_b_skewed),
         .sys_index_in(sys_idx_b_skewed),
         .sys_accept_w_in(sys_acc_b_skewed),
+        // [FIX] 新增连接: 将 Skew 后的信号连入 Systolic
+        .sys_psum_valid_in(sys_psum_val_skewed),
         // Controls
         .sys_enable_rows(ctrl_row_mask),
         .sys_enable_cols(ctrl_col_mask),
