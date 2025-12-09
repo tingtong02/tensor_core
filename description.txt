@@ -1,0 +1,73 @@
+我正在设计一个tensor core，使用systemverilog语言，
+1.数据类型是输入int8，输出int32，有符号
+2.核心维度是32*32或64*64，但是我想先设计一个16*16的,所以需要使用参数W
+3.目标架构是脉冲阵列
+4.所有的输入输出矩阵都按照行优先的模式，即从A[0][0]-->A[0][WIDTH-1]-->...
+5.该tensor core只需要用来计算矩阵A*B+C=D，A*B的过程在systolic里完成，+C的过程使用VPU完成
+6.支持1个AXI4-Full slave接口，用于读取输入矩阵A（m×k）、B（k×n）、C（m×n）,其中m k n均小于W；
+7.支持1个AXI4-Full master接口，用于写回输出矩阵D（m×n）；
+8.支持1个AXI或APB接口用于配置张量处理单元内部寄存器
+
+我将使用i和j来表示PE阵列的行和列，我需要计算D=A*B+C的矩阵运算，同时记矩阵乘法A*B=E，先假设ABCDE将是大小一致的矩阵，C的矩阵加法将由VPU实现
+
+对于PE第j列，待输入的元素来自于矩阵B的第j列，输入顺序是从B[WIDTH-1][j]至B[j][0],那么最终PE[i][j]weight将存储B[i][j]
+如果将PE第0列的第一个元素(即B[WIDTH-1][0])输入时刻记为第0个time step
+那么PE第j列,B[WIDTH-1][j]至B[j][0]开始输入时刻为第j个time step，并且每个元素每个time step向下传递一个PE
+这个矩阵b的每个元素输入都同时伴随pe_accept_w_in=1输入以及对应B元素的行数的输入
+pe_accept_w_in=1将跟着每个B元素向下传递，直到B元素的列数等于PE的ROW(i)，新输入的数据将存储在weight_reg_inactive,且pe_accept_w_in将不再继续传播
+
+接下来我将阐述矩阵A的元素流入过程；pe_valid_in和pe_switch_in的控制；psum的传递过程
+对于PE第i行，待输入的元素来自于矩阵A的第i列，输入顺序是从A[0][i]
+如果将PE第0列的第一个元素(即B[WIDTH-1][0])输入时刻记为第0个time step
+对于pe_switch_in，将在每一行的第一个输入的A元素前一个time step输入，即输入为A[0][i]的前一个周期输入一个pe_switch_in=1，pe_valid_in=0，并且每个time step向右传递一个PE
+即第i行的pe_switch_in=1将在第(i+WIDTH)个time step时刻输入
+那么PE第i行,A[0][i]至A[WIDTH-1][i]开始输入时刻为第(i+WIDTH+1)个time step,并且每个元素每个time step向右传递一个PE
+同时pe_valid_in在第i行的输入和A的输入保持同步，即矩阵A的每个元素输入都同时伴随pe_valid_in=1输入，并且每个time step向右传递一个PE
+所有A元素在输入时pe_switch_in=0，
+
+psum将从上到下传递并累加，最终在j列的最低端输出E[0][j]至E[WIDTH-1][j]
+对于PE第j列，其输出结果将是A[][k]*B[k][j]的和，即依次输出E[0][j]至E[WIDTH-1][j],PE每一列输出的都是矩阵E的第j行
+t=2*WIDTH+1+j，将输出E[0][j]，然后依次输出E[0][j]至E[WIDTH-1][j]
+
+具体而言
+t=0，B[WIDTH-1][0]输入PE[0][0]
+t=j，B[WIDTH-1][j]输入PE[0][j]
+如果control unit需要一个周期向input发出信号，那么t=-1向input buffer发出信号，t=0输入B[WIDTH-1]行，B[WIDTH-1][0]直接输入PE[0][0]，而PE[0][j]将延迟j个周期收到B[WIDTH-1][j]，这个将由B skew实现
+往后每个周期加载B的一行，持续W时长，即从t=0到t=W-1
+
+t=W，pe_switch_in=1, pe_valid_in=0 输入PE[0][0]
+t=W+i, pe_switch_in=1, pe_valid_in=0 输入PE[i][0]
+这个信号应该直接由control unit发出，那么t=W向A skew发出信号，t=W pe_switch_in=1, pe_valid_in=0直接输入PE[0][0]，PE[i][0]将延迟i个周期收到pe_switch_in=1, pe_valid_in=0
+
+t=W+1，A[0][0]输入PE[0][0]
+t=W+1+i，A[0][i]输入PE[i][0]
+如果control unit需要一个周期向input发出信号，那么t=W向input buffer发出信号，t=W+1输入A[0]行，A[0][0]直接输入PE[0][0]，而PE[i][0]将延迟i个周期收到A[0][i]，这个将由A skew实现
+
+t=2*W+1，PE[W-1][0]将输出E[0][0]到vpu[0]，于此同时C[0][0]也要输入vpu[0]
+t=2*W+1+j，PE[W-1][j]将输出E[0][j]到vpu[j]，于此同时C[0][j]也要输入vpu[j]
+如果control unit需要一个周期向input发出信号，那么t=2*W向input buffer发出信号，t=2*W+1输入C[0]行，C[0][0]直接输入vpu[0]，而vpu[j]将延迟j个周期收到C[0][j]，这个将由C skew实现
+
+t=2*W+2，vpu[0]将输出D[0][0]
+t=2*W+2+j，vpu[j]将输出D[0][j]
+我们需要一个De skew，延迟D[0][j] (W-1-j)个周期,然后在vpu[W-1]输出D[0][W-1]进入ligned_wr_data后打包发走
+这里我不太确定，但是如果control unit是同步逻辑，那么发走的时间应该是vpu[W-1]输出D[0][W-1]后的一个周期，即t=3*W+2
+
+以上我描述的都是B第(W-1)行，A/C/D第0行的任务，这个任务将持续W个周期，从B第(W-1)行到B第0行，从A/C/D第0行到A/C/D第(W-1)行
+
+然后在t=W+1时刻开始下一个矩阵乘法B的输入，即B_2第(W-1)行到B第0行，control unit需要在t=W向input buffer发出信号
+同理ABCD每个任务持续W个周期后，暂停一个周期，就要开始下一个周期的任务
+
+
+这里补充说明一下skew的设定
+对于B skew, 需要延迟的时长和PE的j有关，即输入PE[0][j]的信号延迟j个周期，输入PE[0][0]没有延迟
+
+对于A skew, 需要延迟的时长和PE的i有关，即输入PE[i][0]的信号延迟i个周期，输入PE[0][0]没有延迟
+
+对于C skew，需要延迟的时长和PE的j（也就是vpu的列数=PE的列数j）有关，即输入vpu[j]的信号延迟j个周期，输入vpu[0]没有延迟
+
+
+对于小于W*W的矩阵，例如A [m * k]   B[k * n]   E\C\D[m * n] 
+sys_enable_rows: 'K' 维度的掩码 (启用 PE 行 i)
+sys_enable_cols: 'N' 维度的掩码 (启用 PE 列 j)
+虽然每个任务加载完数据不再需要W个时长，但是仍然需要让这个任务加载完后等待，直到W个周期，再等待一个周期后，开始下一个对应矩阵的加载任务
+这样一来，control unit 并不需要根据m k n有所变化
