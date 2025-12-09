@@ -10,9 +10,9 @@
 
 我将使用i和j来表示PE阵列的行和列，我需要计算D=A*B+C的矩阵运算，同时记矩阵乘法A*B=E，先假设ABCDE将是大小一致的矩阵，C的矩阵加法将由VPU实现
 
-对于PE第j列，待输入的元素来自于矩阵B的第j列，输入顺序是从B[WIDTH-1][j]至B[j][0],那么最终PE[i][j]weight将存储B[i][j]
+对于PE第j列，待输入的元素来自于矩阵B的第j列，输入顺序是从B[WIDTH-1][j]至B[0][j],那么最终PE[i][j]weight将存储B[i][j]
 如果将PE第0列的第一个元素(即B[WIDTH-1][0])输入时刻记为第0个time step
-那么PE第j列,B[WIDTH-1][j]至B[j][0]开始输入时刻为第j个time step，并且每个元素每个time step向下传递一个PE
+那么PE第j列,B[WIDTH-1][j]至B[0][j]开始输入时刻为第j个time step，并且每个元素每个time step向下传递一个PE
 这个矩阵b的每个元素输入都同时伴随pe_accept_w_in=1输入以及对应B元素的行数的输入
 pe_accept_w_in=1将跟着每个B元素向下传递，直到B元素的列数等于PE的ROW(i)，新输入的数据将存储在weight_reg_inactive,且pe_accept_w_in将不再继续传播
 
